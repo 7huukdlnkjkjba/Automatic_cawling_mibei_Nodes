@@ -1,0 +1,2 @@
+# 7huukdlnkjkjba-Automatic_cawling_mibei_Nodes
+这是一个自动获取并更新v2rayN节点订阅的Python脚本。它通过爬取目标网站获取mibei最新节点信息，自动更新v2rayN配置并重启程序。主要功能包括：检测/管理v2rayN进程、解析网页获取节点链接、下载节点文件、更新订阅配置等。使用requests、BeautifulSoup等库实现网页抓取，通过psutil和subprocess管理进程，具有完善的日志记录和错误处理机制。
