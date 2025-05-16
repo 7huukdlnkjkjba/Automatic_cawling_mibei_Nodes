@@ -1,4 +1,4 @@
-# 🚀 **Automatic_cawling_mibei_Nodes - 米贝最新节点全自动收割机** 
+# 🚀 **Automatic_cawling_mibei_Nodes - 米贝最新节点全自动收割机** 🚀 #
 
 **🔥 全网最强米贝最新节点自动收割系统！每天0点准时收割最新鲜节点，让你的网络速度突破天际！🔥**
 
