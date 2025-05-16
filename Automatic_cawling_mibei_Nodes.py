@@ -59,7 +59,7 @@ def get_v2rayn_path() -> str:
     """获取v2rayN可执行文件完整路径
 
     返回:
-        str: v2rayN.exe的完整路径
+        str:xray.exe 的完整路径
     """
     return os.path.join(Config.BASE_DIR, Config.V2RAYN_EXE)  # 拼接完整路径
 
@@ -106,7 +106,7 @@ def wait_for_v2rayn(timeout: int = Config.CHECK_TIMEOUT) -> bool:
     返回:
         bool: True表示启动成功，False表示超时
     """
-    logging.info(f"等待 v2rayN.exe 启动（最多 {timeout} 秒）...")
+    logging.info(f"等待xray.exe  启动（最多 {timeout} 秒）...")
     start_time = time.time()  # 记录开始时间
 
     # 在超时时间内循环检查
@@ -181,53 +181,91 @@ def restart_v2rayn() -> bool:
 
 # === 订阅管理 ===
 def update_v2rayn_subscription(new_url: str) -> bool:
-    """更新v2rayN的订阅链接
-
-    参数:
-        new_url (str): 新的订阅URL
-
-    返回:
-        bool: True表示更新成功，False表示失败
     """
-    config_path = get_config_path()  # 获取配置文件路径
-
-    # 检查配置文件是否存在
+    替换 v2rayN config.json 的订阅链接为新的 URL，清除所有旧订阅。
+    """
+    config_path = get_config_path()
     if not os.path.exists(config_path):
-        logging.error(f"无法找到 config.json 文件：{config_path}")
+        logging.error(f"找不到 config.json：{config_path}")
         return False
 
     try:
-        # 读取配置文件内容
         with open(config_path, "r", encoding="utf-8") as f:
             config_data = json.load(f)
 
-        # 获取订阅列表，默认为空列表
-        subscriptions = config_data.get("subscriptions", [])
-        updated = False  # 更新状态标志
+        # 覆盖旧的 subscriptions
+        config_data["subscriptions"] = [{"url": new_url, "enabled": True, "remarks": "Auto Imported"}]
 
-        # 检查是否已存在相同URL
-        for sub in subscriptions:
-            if sub.get("url") == new_url:
-                logging.info("已存在相同订阅链接，无需更新")
-                return True
-
-        # 添加新订阅
-        subscriptions.append({"url": new_url})
-        config_data["subscriptions"] = subscriptions
-
-        # 写回配置文件
         with open(config_path, "w", encoding="utf-8") as f:
             json.dump(config_data, f, indent=4, ensure_ascii=False)
 
-        logging.info(f"已更新 v2rayN 订阅列表，新的链接：{new_url}")
+        logging.info(f"[√] 成功替换订阅链接为：{new_url}")
         return True
 
-    except json.JSONDecodeError as e:
-        logging.error(f"无法解析 config.json 文件：{e}")
     except Exception as e:
-        logging.error(f"更新订阅失败: {type(e).__name__}: {e}")
+        logging.error(f"[×] 更新订阅失败: {type(e).__name__}: {e}")
+        return False
 
-    return False
+import time
+import subprocess
+import psutil
+
+def restart_v2rayn_and_wait(delay: int = 5) -> bool:
+    """
+    重启 v2rayN 应用并等待订阅刷新。
+    """
+    # 关闭已运行的 v2rayN 实例
+    for proc in psutil.process_iter(attrs=["pid", "name"]):
+        if "v2rayN" in proc.info["name"]:
+            proc.kill()
+            logging.info("[√] 已关闭 v2rayN")
+
+    # 启动 v2rayN
+    try:
+        subprocess.Popen(["v2rayN.exe"], cwd="C:\\Program Files\\v2rayN")  # 修改为你的安装路径
+        logging.info("[√] v2rayN 启动成功，等待订阅刷新")
+        time.sleep(delay)
+        return True
+    except Exception as e:
+        logging.error(f"[×] 无法启动 v2rayN: {type(e).__name__}: {e}")
+        return False
+
+import base64
+import socket
+
+def decode_nodes(base64_str: str) -> list[str]:
+    """解码订阅内容为节点行列表"""
+    decoded = base64.b64decode(base64_str).decode("utf-8")
+    return [line.strip() for line in decoded.splitlines() if line.strip()]
+
+def test_latency(host: str, port: int = 443, timeout: float = 1.0) -> float:
+    """TCP ping测试，返回毫秒延迟"""
+    try:
+        start = time.time()
+        sock = socket.create_connection((host, port), timeout)
+        sock.close()
+        return (time.time() - start) * 1000
+    except:
+        return float("inf")
+
+def filter_nodes_by_latency(nodes: list[str], min_ms=60, max_ms=100) -> list[str]:
+    """筛选延迟在 min_ms ~ max_ms 范围内的节点"""
+    good_nodes = []
+    for node in nodes:
+        # 提取 host（这里以 vmess:// 为例）
+        try:
+            if node.startswith("vmess://"):
+                node_json = json.loads(base64.b64decode(node[8:]).decode())
+                host = node_json["add"]
+                delay = test_latency(host)
+                if min_ms <= delay <= max_ms:
+                    good_nodes.append(node)
+                    logging.info(f"[√] {host} 延迟 {delay:.1f} ms，已保留")
+                else:
+                    logging.info(f"[×] {host} 延迟 {delay:.1f} ms，已丢弃")
+        except Exception as e:
+            logging.warning(f"节点解析失败: {e}")
+    return good_nodes
 
 
 # === 节点获取功能 ===
@@ -273,6 +311,96 @@ def find_node_page_url(main_url: str) -> Optional[str]:
         logging.error(f"解析主页面失败: {e}")
 
     return None
+
+
+import os
+import sys
+from typing import Optional
+
+
+def find_v2rayn_installation(base_dir: str = None) -> Optional[str]:
+    """
+    在系统上查找 v2rayN 的安装目录
+    搜索顺序：
+    1. 脚本所在目录
+    2. 程序文件默认安装目录
+    3. 整个系统搜索（限制深度）
+    """
+    # 可能的默认安装路径
+    default_paths = [
+        os.path.join(os.environ.get('ProgramFiles', ''), 'v2rayN'),
+        os.path.join(os.environ.get('ProgramFiles(x86)', ''), 'v2rayN'),
+        os.path.expanduser('~\\AppData\\Local\\Programs\\v2rayN')
+    ]
+
+    # 要检查的目录列表
+    search_paths = []
+    if base_dir:
+        search_paths.append(base_dir)
+    search_paths.extend(default_paths)
+
+    # 检查这些路径
+    for path in search_paths:
+        exe_path = os.path.join(path, 'v2rayN.exe')
+        if os.path.exists(exe_path):
+            return path
+
+    # 如果还没找到，尝试在整个系统中搜索（限制深度）
+    for root, dirs, files in os.walk('d:\\', topdown=True):
+        if 'v2rayN.exe' in files:
+            return root
+        # 限制搜索深度为3层
+        if root.count(os.sep) >= 3:
+            dirs[:] = []  # 不再递归更深层
+
+    return None
+
+
+def get_config_path(v2rayn_dir: str) -> Optional[str]:
+    """获取配置文件路径"""
+    possible_locations = [
+        os.path.join(v2rayn_dir, 'config.json'),
+        os.path.join(v2rayn_dir, 'bin', 'config.json'),
+        os.path.join(v2rayn_dir, 'data', 'config.json'),
+        os.path.join(os.path.expanduser('~'), 'AppData', 'Roaming', 'v2rayN', 'config.json')
+    ]
+
+    for path in possible_locations:
+        if os.path.exists(path):
+            return path
+
+    return None
+
+
+def main():
+    # 1. 首先尝试脚本所在目录
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    v2rayn_dir = find_v2rayn_installation(script_dir)
+
+    if not v2rayn_dir:
+        print("错误: 找不到 v2rayN 安装目录")
+        sys.exit(1)
+
+    print(f"找到 v2rayN 目录: {v2rayn_dir}")
+
+    # 2. 查找配置文件
+    config_path = get_config_path(v2rayn_dir)
+    if not config_path:
+        print("错误: 找不到 config.json 文件")
+        sys.exit(1)
+
+    print(f"找到配置文件: {config_path}")
+
+    # 3. 验证xray.exe  是否存在
+    exe_path = os.path.join(v2rayn_dir, 'v2rayN.exe')
+    if not os.path.exists(exe_path):
+        print("错误: 找不到xray.exe ")
+        sys.exit(1)
+
+    print("所有必要文件验证通过")
+    print(f"v2rayN.exe 路径: {exe_path}")
+    print(f"config.json 路径: {config_path}")
+
 
 
 def extract_node_url(node_page_url: str) -> Optional[str]:
@@ -453,6 +581,19 @@ exit
     except Exception as e:
         print(f"[×] 生成 .bat 文件失败: {e}")
 
+# 定义无窗口化运行的函数
+def run_script_no_window(script_path):
+    # 设置子进程启动信息
+    startupinfo = subprocess.STARTUPINFO()
+    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW  # 隐藏窗口
+
+    # 使用 CREATE_NO_WINDOW 参数运行脚本
+    process = subprocess.Popen(
+        ["python", script_path],
+        startupinfo=startupinfo,
+        creationflags=subprocess.CREATE_NO_WINDOW
+    )
+    process.wait()  # 等待脚本执行完成
 
 if __name__ == "__main__":
     daemon_monitor(interval=600)  # 每10分钟检测一次
