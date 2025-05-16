@@ -137,20 +137,6 @@ def wechat_notify(message):
 1. 检查日志文件`logs/error.log`
 2. 运行诊断脚本`python diagnose.py`
 3. 提交Issue到GitHub仓库
-
-**紧急联系：**
-- Telegram: @mibei_nodes_support
-- 邮箱: support@mibei-nodes.com
-
----
-
-## 🎁 **特别福利**
-
-输入优惠码`GITHUB2023`可获得：
-- 专属高速节点列表
-- 私人定制过滤规则
-- 优先技术支持
-
 ---
 
 **现在就启动你的节点收割之旅吧！让网络速度突破物理极限！** 💨💨💨
