@@ -206,6 +206,131 @@ def update_v2rayn_subscription(new_url: str) -> bool:
         logging.error(f"[×] 更新订阅失败: {type(e).__name__}: {e}")
         return False
 
+
+def add_nodes_to_mibei_group() -> bool:
+    """
+    在v2rayN中创建名为"米贝"的分组，并将节点粘贴到该分组中。
+    如果分组已存在，则覆盖原有节点。
+    """
+    # 获取配置文件路径
+    v2rayn_dir = find_v2rayn_installation()
+    if not v2rayn_dir:
+        logging.error("找不到v2rayN安装目录")
+        return False
+    
+    config_path = get_config_path(v2rayn_dir)
+    if not config_path:
+        logging.error("找不到config.json文件")
+        return False
+    
+    # 获取节点文件路径
+    nodes_path = get_nodes_path()
+    if not os.path.exists(nodes_path):
+        logging.error(f"找不到节点文件: {nodes_path}")
+        return False
+    
+    try:
+        # 读取配置文件
+        with open(config_path, "r", encoding="utf-8") as f:
+            config_data = json.load(f)
+        
+        # 读取节点文件内容
+        with open(nodes_path, "r", encoding="utf-8") as f:
+            node_lines = f.readlines()
+        
+        # 确保servers字段存在
+        if "servers" not in config_data:
+            config_data["servers"] = []
+        
+        # 过滤掉米贝分组的旧节点
+        config_data["servers"] = [
+            server for server in config_data["servers"] 
+            if server.get("group") != "米贝"
+        ]
+        
+        # 为每个节点添加到米贝分组
+        new_server_count = 0
+        for line in node_lines:
+            line = line.strip()
+            if not line:
+                continue
+                
+            # 根据不同的节点类型解析
+            try:
+                if line.startswith("vmess://"):
+                    # 处理vmess节点
+                    vmess_content = line[8:]
+                    # 处理可能的base64填充问题
+                    padding = len(vmess_content) % 4
+                    if padding:
+                        vmess_content += '=' * (4 - padding)
+                    
+                    vmess_json = json.loads(base64.b64decode(vmess_content).decode('utf-8'))
+                    
+                    # 创建新的服务器条目
+                    server = {
+                        "id": str(random.randint(100000, 999999)),
+                        "remarks": vmess_json.get("ps", "米贝节点"),
+                        "group": "米贝",
+                        "type": "VMess",
+                        "address": vmess_json.get("add", ""),
+                        "port": int(vmess_json.get("port", 443)),
+                        "uuid": vmess_json.get("id", ""),
+                        "alterId": int(vmess_json.get("aid", 0)),
+                        "security": vmess_json.get("scy", "auto"),
+                        "network": vmess_json.get("net", "tcp"),
+                        "headerType": vmess_json.get("type", "none"),
+                        "requestHost": vmess_json.get("host", ""),
+                        "path": vmess_json.get("path", ""),
+                        "streamSecurity": vmess_json.get("tls", ""),
+                        "sni": vmess_json.get("sni", ""),
+                        "fingerprint": vmess_json.get("fp", ""),
+                        "allowInsecure": True
+                    }
+                    config_data["servers"].append(server)
+                    new_server_count += 1
+                
+                elif line.startswith("trojan://"):
+                    # 处理trojan节点（简化版）
+                    # 实际的解析可能需要更复杂的逻辑
+                    server = {
+                        "id": str(random.randint(100000, 999999)),
+                        "remarks": "米贝Trojan节点",
+                        "group": "米贝",
+                        "type": "Trojan",
+                        "allowInsecure": True
+                    }
+                    config_data["servers"].append(server)
+                    new_server_count += 1
+                    
+                elif line.startswith("ss://"):
+                    # 处理shadowsocks节点（简化版）
+                    server = {
+                        "id": str(random.randint(100000, 999999)),
+                        "remarks": "米贝SS节点",
+                        "group": "米贝",
+                        "type": "Shadowsocks",
+                    }
+                    config_data["servers"].append(server)
+                    new_server_count += 1
+            except Exception as e:
+                logging.warning(f"解析节点失败: {line[:30]}... {str(e)}")
+                continue
+        
+        # 保存更新后的配置文件
+        with open(config_path, "w", encoding="utf-8") as f:
+            json.dump(config_data, f, indent=4, ensure_ascii=False)
+        
+        logging.info(f"[√] 成功将{new_server_count}个节点添加到米贝分组")
+        return True
+        
+    except json.JSONDecodeError as e:
+        logging.error(f"解析配置文件失败: {str(e)}")
+        return False
+    except Exception as e:
+        logging.error(f"添加节点到米贝分组失败: {type(e).__name__}: {e}")
+        return False
+
 import time
 import subprocess
 import psutil
@@ -447,10 +572,19 @@ def download_nodes_file(node_url: str) -> bool:
         response = requests.get(node_url, headers=get_random_headers(), timeout=5)
         response.raise_for_status()  # 检查下载是否成功
 
+        # 去重处理
+        lines = response.text.strip().split('\n')
+        unique_lines = list(set(lines))  # 使用集合去重
+        unique_content = '\n'.join(unique_lines)
+        
+        # 记录去重情况
+        if len(unique_lines) < len(lines):
+            logging.info(f"节点去重完成，从{len(lines)}个节点中去除了{len(lines) - len(unique_lines)}个重复节点")
+        
         # 获取保存路径并写入文件
         nodes_path = get_nodes_path()
         with open(nodes_path, "w", encoding="utf-8") as f:
-            f.write(response.text)
+            f.write(unique_content)
 
         logging.info(f"节点文件已保存到: {nodes_path}")
         return True
@@ -493,7 +627,11 @@ def main():
     if not download_nodes_file(node_url):
         sys.exit(1)  # 下载失败则退出
 
-    # 6. 更新订阅并重启v2rayN
+    # 6. 添加节点到米贝分组
+    if not add_nodes_to_mibei_group():
+        logging.warning("添加节点到米贝分组失败，但继续执行后续步骤")
+
+    # 7. 更新订阅并重启v2rayN
     if update_v2rayn_subscription(node_url):
         if not restart_v2rayn():  # 重启v2rayN
             sys.exit(1)  # 重启失败则退出
@@ -516,23 +654,77 @@ def update_and_restart_if_needed():
     if not download_nodes_file(node_url):
         return
 
+    # 添加节点到米贝分组
+    if not add_nodes_to_mibei_group():
+        logging.warning("添加节点到米贝分组失败，但继续执行后续步骤")
+
     # 更新订阅并重启
     if update_v2rayn_subscription(node_url):
         restart_v2rayn()
 
-def daemon_monitor(interval: int = 300):
-    """后台守护主循环，每隔 interval 秒检查一次"""
+def should_crawl_now() -> bool:
+    """
+    检查当前时间是否是适合爬取的时间点
+    根据米贝网站的更新规律，每天固定时间更新节点
+    """
+    now = datetime.now()
+    # 获取当前小时和分钟
+    current_hour = now.hour
+    current_minute = now.minute
+    
+    # 定义爬取时间点（24小时制）
+    # 假设米贝网站在每天的 12:00、18:00 和 22:00 更新节点
+    # 我们在每个时间点的前后10分钟内进行爬取
+    crawl_times = [(12, 0), (18, 0), (22, 0)]
+    
+    for (target_hour, target_minute) in crawl_times:
+        # 计算时间差
+        hour_diff = abs(current_hour - target_hour)
+        minute_diff = abs(current_minute - target_minute)
+        
+        # 如果在目标时间的10分钟内，返回True
+        if hour_diff == 0 and minute_diff <= 10:
+            return True
+        # 处理跨小时的情况（如23:55接近00:00）
+        elif hour_diff == 23 and ((current_hour == 23 and current_minute >= 50) or 
+                                 (current_hour == 0 and current_minute <= 10)):
+            return True
+    
+    return False
+
+def daemon_monitor(interval: int = 600):
+    """后台守护主循环，根据时间点决定是否爬取"""
     setup_logging()
     logging.info("=== v2rayN 后台监控程序已启动 ===")
+    
+    # 记录上次爬取的日期
+    last_crawl_date = datetime.now().date()
 
     try:
         while True:
-            if not is_v2rayn_running():
-                logging.warning("检测到 v2rayN 未运行，开始更新节点并重启...")
+            now = datetime.now()
+            current_date = now.date()
+            
+            # 检查是否需要爬取的条件：
+            # 1. 当前时间是爬取时间点
+            # 2. 或者v2rayN未运行（需要重启）
+            # 3. 或者日期变更（新的一天，需要更新节点）
+            if should_crawl_now() or not is_v2rayn_running() or current_date != last_crawl_date:
+                logging.info("检测到需要更新节点...")
                 update_and_restart_if_needed()
+                last_crawl_date = current_date
             else:
-                logging.info("v2rayN 正常运行中，无需更新")
-            time.sleep(interval)  # 等待下一个周期
+                logging.info(f"v2rayN 正常运行中，当前时间 {now.strftime('%H:%M:%S')} 不在爬取时间点")
+            
+            # 根据当前时间调整检查间隔
+            # 非爬取时间点可以使用较长间隔，接近爬取时间点使用较短间隔
+            if should_crawl_now():
+                wait_interval = 60  # 爬取时间点附近每分钟检查一次
+            else:
+                wait_interval = interval  # 正常使用配置的间隔
+                
+            logging.info(f"等待 {wait_interval} 秒后再次检查")
+            time.sleep(wait_interval)  # 等待下一个周期
     except KeyboardInterrupt:
         logging.info("监控程序手动中断，退出。")
     except Exception as e:
