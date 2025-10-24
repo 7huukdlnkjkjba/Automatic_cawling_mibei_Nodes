@@ -8,6 +8,8 @@ import requests  # HTTP请求库
 import subprocess  # 子进程管理
 import psutil  # 进程和系统工具库
 import json  # JSON数据处理
+import base64  # Base64编码解码
+import socket  # 网络连接
 from bs4 import BeautifulSoup  # HTML解析库
 from datetime import datetime  # 日期时间处理
 import logging  # 日志记录
@@ -64,12 +66,29 @@ def get_v2rayn_path() -> str:
     return os.path.join(Config.BASE_DIR, Config.V2RAYN_EXE)  # 拼接完整路径
 
 
-def get_config_path() -> str:
+def get_config_path(v2rayn_dir: Optional[str] = None) -> Optional[str]:
     """获取v2rayN配置文件完整路径
-
+    
+    参数:
+        v2rayn_dir (str): v2rayN安装目录，如果为None则使用默认目录
+    
     返回:
         str: config.json的完整路径
     """
+    # 如果提供了v2rayn_dir，使用它来查找配置文件
+    if v2rayn_dir:
+        possible_locations = [
+            os.path.join(v2rayn_dir, 'config.json'),
+            os.path.join(v2rayn_dir, 'bin', 'config.json'),
+            os.path.join(v2rayn_dir, 'data', 'config.json'),
+            os.path.join(os.path.expanduser('~'), 'AppData', 'Roaming', 'v2rayN', 'config.json')
+        ]
+
+        for path in possible_locations:
+            if os.path.exists(path):
+                return path
+    
+    # 默认返回脚本目录下的配置文件
     return os.path.join(Config.BASE_DIR, Config.CONFIG_FILE)
 
 
@@ -331,37 +350,6 @@ def add_nodes_to_mibei_group() -> bool:
         logging.error(f"添加节点到米贝分组失败: {type(e).__name__}: {e}")
         return False
 
-import time
-import subprocess
-import psutil
-
-def restart_v2rayn_and_wait(delay: int = 5) -> bool:
-    """
-    重启 v2rayN 应用并等待订阅刷新。
-    """
-    # 关闭已运行的 v2rayN 实例
-    for proc in psutil.process_iter(attrs=["pid", "name"]):
-        if "v2rayN" in proc.info["name"]:
-            proc.kill()
-            logging.info("[√] 已关闭 v2rayN")
-
-    # 启动 v2rayN
-    try:
-        subprocess.Popen(["v2rayN.exe"], cwd="C:\\Program Files\\v2rayN")  # 修改为你的安装路径
-        logging.info("[√] v2rayN 启动成功，等待订阅刷新")
-        time.sleep(delay)
-        return True
-    except Exception as e:
-        logging.error(f"[×] 无法启动 v2rayN: {type(e).__name__}: {e}")
-        return False
-
-import base64
-import socket
-
-def decode_nodes(base64_str: str) -> list[str]:
-    """解码订阅内容为节点行列表"""
-    decoded = base64.b64decode(base64_str).decode("utf-8")
-    return [line.strip() for line in decoded.splitlines() if line.strip()]
 
 def test_latency(host: str, port: int = 443, timeout: float = 1.0) -> float:
     """TCP ping测试，返回毫秒延迟"""
@@ -372,25 +360,6 @@ def test_latency(host: str, port: int = 443, timeout: float = 1.0) -> float:
         return (time.time() - start) * 1000
     except:
         return float("inf")
-
-def filter_nodes_by_latency(nodes: list[str], min_ms=60, max_ms=100) -> list[str]:
-    """筛选延迟在 min_ms ~ max_ms 范围内的节点"""
-    good_nodes = []
-    for node in nodes:
-        # 提取 host（这里以 vmess:// 为例）
-        try:
-            if node.startswith("vmess://"):
-                node_json = json.loads(base64.b64decode(node[8:]).decode())
-                host = node_json["add"]
-                delay = test_latency(host)
-                if min_ms <= delay <= max_ms:
-                    good_nodes.append(node)
-                    logging.info(f"[√] {host} 延迟 {delay:.1f} ms，已保留")
-                else:
-                    logging.info(f"[×] {host} 延迟 {delay:.1f} ms，已丢弃")
-        except Exception as e:
-            logging.warning(f"节点解析失败: {e}")
-    return good_nodes
 
 
 # === 节点获取功能 ===
@@ -438,11 +407,6 @@ def find_node_page_url(main_url: str) -> Optional[str]:
     return None
 
 
-import os
-import sys
-from typing import Optional
-
-
 def find_v2rayn_installation(base_dir: str = None) -> Optional[str]:
     """
     在系统上查找 v2rayN 的安装目录
@@ -481,30 +445,15 @@ def find_v2rayn_installation(base_dir: str = None) -> Optional[str]:
     return None
 
 
-def get_config_path(v2rayn_dir: str) -> Optional[str]:
-    """获取配置文件路径"""
-    possible_locations = [
-        os.path.join(v2rayn_dir, 'config.json'),
-        os.path.join(v2rayn_dir, 'bin', 'config.json'),
-        os.path.join(v2rayn_dir, 'data', 'config.json'),
-        os.path.join(os.path.expanduser('~'), 'AppData', 'Roaming', 'v2rayN', 'config.json')
-    ]
-
-    for path in possible_locations:
-        if os.path.exists(path):
-            return path
-
-    return None
-
-
-def main():
+def validate_v2rayn_installation() -> bool:
+    """验证v2rayN安装是否正确"""
     # 1. 首先尝试脚本所在目录
     script_dir = os.path.dirname(os.path.abspath(__file__))
     v2rayn_dir = find_v2rayn_installation(script_dir)
 
     if not v2rayn_dir:
         print("错误: 找不到 v2rayN 安装目录")
-        sys.exit(1)
+        return False
 
     print(f"找到 v2rayN 目录: {v2rayn_dir}")
 
@@ -512,7 +461,7 @@ def main():
     config_path = get_config_path(v2rayn_dir)
     if not config_path:
         print("错误: 找不到 config.json 文件")
-        sys.exit(1)
+        return False
 
     print(f"找到配置文件: {config_path}")
 
@@ -520,12 +469,12 @@ def main():
     exe_path = os.path.join(v2rayn_dir, 'v2rayN.exe')
     if not os.path.exists(exe_path):
         print("错误: 找不到xray.exe ")
-        sys.exit(1)
+        return False
 
     print("所有必要文件验证通过")
     print(f"v2rayN.exe 路径: {exe_path}")
     print(f"config.json 路径: {config_path}")
-
+    return True
 
 
 def extract_node_url(node_page_url: str) -> Optional[str]:
@@ -574,12 +523,84 @@ def download_nodes_file(node_url: str) -> bool:
 
         # 去重处理
         lines = response.text.strip().split('\n')
-        unique_lines = list(set(lines))  # 使用集合去重
+        
+        # 加强版去重：基于地址和端口的双重判断
+        unique_lines = []
+        seen_node_identifiers = set()  # 用于存储已见过的节点标识（地址+端口）
+        
+        for line in lines:
+            if not line.strip():
+                continue
+                
+            # 尝试解析节点，提取地址和端口
+            node_identifier = None
+            
+            # 处理vmess节点
+            if line.startswith("vmess://"):
+                try:
+                    vmess_content = line[8:]
+                    # 处理可能的base64填充问题
+                    padding = len(vmess_content) % 4
+                    if padding:
+                        vmess_content += '=' * (4 - padding)
+                    
+                    vmess_json = json.loads(base64.b64decode(vmess_content).decode('utf-8', errors='ignore'))
+                    address = vmess_json.get("add", "")
+                    port = str(vmess_json.get("port", ""))
+                    if address and port:
+                        node_identifier = f"{address}:{port}"
+                except Exception:
+                    pass  # 解析失败则回退到原始去重方式
+            
+            # 处理trojan节点（简化解析）
+            elif line.startswith("trojan://"):
+                try:
+                    # 尝试从URL中提取地址和端口
+                    pattern = r'trojan://[^@]+@([^:]+):(\d+)'  # 简化的正则匹配
+                    match = re.search(pattern, line)
+                    if match:
+                        address = match.group(1)
+                        port = match.group(2)
+                        node_identifier = f"{address}:{port}"
+                except Exception:
+                    pass
+            
+            # 处理ss节点（简化解析）
+            elif line.startswith("ss://"):
+                try:
+                    # 尝试从URL中提取地址和端口
+                    ss_content = line[5:]
+                    if '#' in ss_content:
+                        ss_content = ss_content.split('#')[0]  # 去除节点名称部分
+                    # 处理可能的base64填充问题
+                    padding = len(ss_content) % 4
+                    if padding:
+                        ss_content += '=' * (4 - padding)
+                    
+                    decoded = base64.b64decode(ss_content).decode('utf-8', errors='ignore')
+                    pattern = r'[^@]+@([^:]+):(\d+)'  # 简化的正则匹配
+                    match = re.search(pattern, decoded)
+                    if match:
+                        address = match.group(1)
+                        port = match.group(2)
+                        node_identifier = f"{address}:{port}"
+                except Exception:
+                    pass
+            
+            # 如果成功提取了节点标识，使用它进行去重
+            if node_identifier and node_identifier not in seen_node_identifiers:
+                seen_node_identifiers.add(node_identifier)
+                unique_lines.append(line)
+            # 如果无法解析节点标识，则使用原始行内容进行去重（回退方案）
+            elif not node_identifier and line not in unique_lines:
+                unique_lines.append(line)
+        
         unique_content = '\n'.join(unique_lines)
         
         # 记录去重情况
         if len(unique_lines) < len(lines):
-            logging.info(f"节点去重完成，从{len(lines)}个节点中去除了{len(lines) - len(unique_lines)}个重复节点")
+            removed_count = len(lines) - len(unique_lines)
+            logging.info(f"节点去重完成，从{len(lines)}个节点中去除了{removed_count}个重复节点（使用地址和端口双重判断）")
         
         # 获取保存路径并写入文件
         nodes_path = get_nodes_path()
@@ -602,36 +623,35 @@ def main():
     setup_logging()  # 初始化日志系统
     logging.info("=== v2ray自动更新程序开始运行 ===")
 
-    # 1. 检查v2rayN可执行文件是否存在
-    v2rayn_path = get_v2rayn_path()
-    if not os.path.exists(v2rayn_path):
-        logging.error(f"错误: v2rayN 文件不存在: {v2rayn_path}")
-        sys.exit(1)  # 退出程序
+    # 验证v2rayN安装
+    if not validate_v2rayn_installation():
+        logging.error("v2rayN安装验证失败")
+        sys.exit(1)
 
-    # 2. 确保v2rayN正在运行
+    # 确保v2rayN正在运行
     if not is_v2rayn_running():
         if not start_v2rayn():  # 尝试启动
             sys.exit(1)  # 启动失败则退出
 
-    # 3. 获取节点页面URL
+    # 获取节点页面URL
     node_page_url = find_node_page_url(Config.MAIN_URL)
     if not node_page_url:
         sys.exit(1)  # 未找到则退出
 
-    # 4. 从节点页面提取节点文件URL
+    # 从节点页面提取节点文件URL
     node_url = extract_node_url(node_page_url)
     if not node_url:
         sys.exit(1)  # 未找到则退出
 
-    # 5. 下载节点文件
+    # 下载节点文件
     if not download_nodes_file(node_url):
         sys.exit(1)  # 下载失败则退出
 
-    # 6. 添加节点到米贝分组
+    # 添加节点到米贝分组
     if not add_nodes_to_mibei_group():
         logging.warning("添加节点到米贝分组失败，但继续执行后续步骤")
 
-    # 7. 更新订阅并重启v2rayN
+    # 更新订阅并重启v2rayN
     if update_v2rayn_subscription(node_url):
         if not restart_v2rayn():  # 重启v2rayN
             sys.exit(1)  # 重启失败则退出
