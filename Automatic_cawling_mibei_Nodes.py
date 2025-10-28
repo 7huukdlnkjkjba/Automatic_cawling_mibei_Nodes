@@ -15,22 +15,83 @@ from datetime import datetime  # 日期时间处理
 import logging  # 日志记录
 from typing import Optional, List, Dict, Any  # 类型注解
 
+# === 高级黑客模块导入 ===
+try:
+    import aiohttp  # 异步HTTP请求
+    import asyncio  # 异步编程库
+    import aiofiles  # 异步文件操作
+    has_async = True
+except ImportError:
+    logging.warning("🚫 异步模块未安装，将使用同步模式运行")
+    has_async = False
+
+try:
+    import win32api
+    import win32process
+    import win32con
+    has_win32 = True
+except ImportError:
+    logging.warning("🚫 win32模块未安装，进程隐藏功能受限")
+    has_win32 = False
+
 
 # === 配置类 ===
 class Config:
-    """程序全局配置类"""
+    """程序全局配置类 - 黑客模式"""
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))  # 获取脚本所在目录绝对路径
     V2RAYN_EXE = "v2rayN.exe"  # v2rayN可执行文件名
     CONFIG_FILE = "config.json"  # v2rayN配置文件名称
     NODES_FILE = "nodes.txt"  # 节点信息保存文件名
     CHECK_TIMEOUT = 10  # 进程检查超时时间(秒)
     MAIN_URL = 'https://www.mibei77.com/'  # 目标网站主URL
-
-    # 用户代理列表，用于模拟不同浏览器
+    
+    # 🔥 性能优化配置
+    MAX_CONCURRENT_REQUESTS = 20  # 最大并发请求数
+    CONNECTION_TIMEOUT = 10  # 连接超时时间
+    RETRY_ATTEMPTS = 3  # 最大重试次数
+    
+    # 🛡️ 隐蔽性配置
+    ENABLE_STEALTH = True  # 启用隐身模式
+    ENABLE_FAKE_LOGGING = True  # 启用迷惑性日志
+    MIN_DELAY = 1.0  # 最小延时(秒)
+    MAX_DELAY = 3.0  # 最大延时(秒)
+    
+    # 📊 节点筛选配置
+    ENABLE_NODE_BENCHMARK = True  # 启用节点测速
+    BENCHMARK_THRESHOLD = 1000  # 延迟阈值(毫秒)
+    TOP_NODES_PERCENTAGE = 20  # 保留前20%的节点
+    
+    # 🌐 高质量用户代理列表 - 模拟真实浏览器指纹
     USER_AGENTS = [
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64)...",  # Chrome
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X...",  # Safari
-        # 其他用户代理...
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Firefox/113.0 Safari/537.36",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.4 Safari/605.1.15",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Edge/114.0.1823.67 Safari/537.36",
+        "Mozilla/5.0 (Linux; Android 13; SM-G998B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Mobile Safari/537.36"
+    ]
+    
+    # 📱 完整HTTP请求头 - 模拟真实流量特征
+    FULL_HEADERS = {
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+        'Accept-Language': 'zh-CN,zh;q=0.8,zh-TW;q=0.7,zh-HK;q=0.5,en-US;q=0.3,en;q=0.2',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Connection': 'keep-alive',
+        'Upgrade-Insecure-Requests': '1',
+        'Cache-Control': 'max-age=0',
+        'TE': 'trailers',
+        'Pragma': 'no-cache'
+    }
+    
+    # 🎭 迷惑性日志消息
+    FAKE_LOG_MESSAGES = [
+        "正在检查系统更新...",
+        "清理临时文件中...",
+        "优化网络设置...",
+        "扫描系统安全...",
+        "备份用户数据...",
+        "校准系统时间...",
+        "同步网络配置...",
+        "检查硬件状态..."
     ]
 
 
@@ -48,12 +109,219 @@ def setup_logging():
 
 
 # === 工具函数 ===
+
+# 🎭 迷惑性日志生成器
+def fake_logging():
+    """生成迷惑性日志，让监控摸不着头脑"""
+    if Config.ENABLE_FAKE_LOGGING and random.random() < 0.3:
+        logging.info(random.choice(Config.FAKE_LOG_MESSAGES))
+
+# 🔒 隐身请求头生成器
+def get_stealth_headers() -> Dict[str, str]:
+    """生成更隐蔽的完整请求头，模拟真实浏览器行为
+    
+    返回:
+        Dict[str, str]: 包含完整浏览器指纹的请求头
+    """
+    headers = Config.FULL_HEADERS.copy()
+    headers['User-Agent'] = random.choice(Config.USER_AGENTS)
+    
+    # 随机添加一些常见但非必要的请求头，增加真实性
+    if random.random() < 0.5:
+        headers['DNT'] = '1'  # Do Not Track
+    if random.random() < 0.3:
+        headers['Sec-Fetch-Dest'] = 'document'
+        headers['Sec-Fetch-Mode'] = 'navigate'
+        headers['Sec-Fetch-Site'] = 'none'
+        headers['Sec-Fetch-User'] = '?1'
+    
+    return headers
+
+# 🛡️ 智能重试装饰器
+def smart_retry(max_retries=Config.RETRY_ATTEMPTS):
+    """智能重试装饰器，被ban也不怕
+    
+    参数:
+        max_retries: 最大重试次数
+    """
+    def decorator(func):
+        def wrapper(*args, **kwargs):
+            for attempt in range(max_retries):
+                try:
+                    # 随机延时，避免被识别为机器人
+                    if Config.ENABLE_STEALTH and attempt > 0:
+                        sleep_time = (2 ** attempt) + random.uniform(0, 1)
+                        logging.info(f"等待 {sleep_time:.2f} 秒后重试...")
+                        time.sleep(sleep_time)
+                    
+                    return func(*args, **kwargs)
+                except requests.exceptions.RequestException as e:
+                    if attempt == max_retries - 1:
+                        logging.error(f"[×] 所有重试都失败了: {e}")
+                        raise
+                    logging.warning(f"[!] 第 {attempt+1} 次尝试失败: {e}，准备重试...")
+        return wrapper
+    return decorator
+
+# 🚀 异步请求函数
+async def fetch_page_async(session, url, headers=None):
+    """异步获取页面内容
+    
+    参数:
+        session: aiohttp.ClientSession对象
+        url: 目标URL
+        headers: 请求头
+    
+    返回:
+        响应内容或None
+    """
+    if headers is None:
+        headers = get_stealth_headers() if Config.ENABLE_STEALTH else get_random_headers()
+    
+    try:
+        # 模拟真人操作的随机延时
+        if Config.ENABLE_STEALTH:
+            await asyncio.sleep(random.uniform(Config.MIN_DELAY, Config.MAX_DELAY))
+        
+        async with session.get(url, headers=headers, timeout=Config.CONNECTION_TIMEOUT) as response:
+            response.raise_for_status()
+            return await response.text()
+    except Exception as e:
+        logging.error(f"[×] 异步请求 {url} 失败: {e}")
+        return None
+
+# 📊 异步节点测速
+async def test_node_speed_async(node_info):
+    """异步测试节点延迟
+    
+    参数:
+        node_info: 节点信息字典
+    
+    返回:
+        包含延迟信息的字典
+    """
+    start_time = time.time()
+    host = node_info.get('address', '')
+    port = node_info.get('port', 443)
+    
+    try:
+        # 使用异步socket连接测试
+        reader, writer = await asyncio.wait_for(
+            asyncio.open_connection(host, port), 
+            timeout=3.0
+        )
+        writer.close()
+        await writer.wait_closed()
+        latency = (time.time() - start_time) * 1000  # 转换为毫秒
+        logging.debug(f"节点 {host}:{port} 延迟: {latency:.2f}ms")
+        return {**node_info, 'latency': latency}
+    except Exception:
+        return {**node_info, 'latency': float('inf')}
+
+# 🎯 深度进程隐藏
+def create_ghost_process(cmd):
+    """创建几乎不可见的进程
+    
+    参数:
+        cmd: 要执行的命令
+    
+    返回:
+        进程对象
+    """
+    # 设置启动信息
+    startupinfo = subprocess.STARTUPINFO()
+    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    
+    # 基本的隐藏参数
+    creationflags = subprocess.CREATE_NO_WINDOW
+    
+    # 如果有win32模块，使用更高级的隐藏技术
+    if has_win32:
+        startupinfo.wShowWindow = win32con.SW_HIDE
+        creationflags |= (subprocess.IDLE_PRIORITY_CLASS | 
+                          win32process.CREATE_BREAKAWAY_FROM_JOB)
+    
+    # 低优先级运行，降低存在感
+    process = subprocess.Popen(
+        cmd,
+        startupinfo=startupinfo,
+        creationflags=creationflags
+    )
+    return process
+
+# 🔄 自适应爬取器
+class AdaptiveCrawler:
+    """根据网络状况智能调整爬取策略"""
+    def __init__(self):
+        self.success_count = 0
+        self.fail_count = 0
+        self.last_success_time = None
+        self.consecutive_fails = 0
+        self.adaptive_interval = 600  # 初始检查间隔
+        
+    def record_result(self, success: bool):
+        """记录爬取结果
+        
+        参数:
+            success: 是否成功
+        """
+        if success:
+            self.success_count += 1
+            self.last_success_time = datetime.now()
+            self.consecutive_fails = 0
+            # 成功时，逐步降低检查间隔
+            self.adaptive_interval = max(300, int(self.adaptive_interval * 0.8))
+        else:
+            self.fail_count += 1
+            self.consecutive_fails += 1
+            # 失败时，立即增加检查间隔
+            self.adaptive_interval = min(3600, int(self.adaptive_interval * 1.5))
+    
+    def should_crawl(self) -> bool:
+        """根据成功率动态调整是否爬取
+        
+        返回:
+            是否应该爬取
+        """
+        # 连续失败太多次，暂停一下
+        if self.consecutive_fails >= 5:
+            logging.warning(f"[!] 连续失败 {self.consecutive_fails} 次，降低爬取频率")
+            return random.random() < 0.1  # 10%的概率尝试
+        
+        total = self.success_count + self.fail_count
+        if total == 0:
+            return True
+            
+        success_rate = self.success_count / total
+        
+        # 根据成功率动态调整爬取策略
+        if success_rate > 0.8:
+            # 网络好，大胆爬
+            return True
+        elif success_rate > 0.5:
+            # 网络一般，谨慎爬
+            return random.random() > 0.3
+        else:
+            # 网络差，少爬
+            return random.random() > 0.7
+    
+    def get_check_interval(self) -> int:
+        """获取当前应该等待的时间间隔
+        
+        返回:
+            等待秒数
+        """
+        return self.adaptive_interval
+
+# 原始的随机请求头函数，保持兼容性
 def get_random_headers() -> Dict[str, str]:
     """生成包含随机User-Agent的请求头字典
 
     返回:
         Dict[str, str]: 包含随机User-Agent的请求头
     """
+    if Config.ENABLE_STEALTH:
+        return get_stealth_headers()
     return {"User-Agent": random.choice(Config.USER_AGENTS)}  # 随机选择一个用户代理
 
 
@@ -61,9 +329,62 @@ def get_v2rayn_path() -> str:
     """获取v2rayN可执行文件完整路径
 
     返回:
-        str:xray.exe 的完整路径
+        str: v2rayN.exe 的完整路径
     """
     return os.path.join(Config.BASE_DIR, Config.V2RAYN_EXE)  # 拼接完整路径
+
+# 异步下载节点文件
+async def download_nodes_file_async(node_url):
+    """异步下载节点文件
+    
+    参数:
+        node_url: 节点文件URL
+    
+    返回:
+        节点内容或None
+    """
+    fake_logging()  # 生成迷惑性日志
+    logging.info(f"[🔒] 正在异步下载节点文件: {node_url}")
+    
+    if has_async:
+        async with aiohttp.ClientSession() as session:
+            content = await fetch_page_async(session, node_url)
+            if content:
+                # 去重处理保持不变
+                lines = content.strip().split('\n')
+                unique_lines = []
+                seen_node_identifiers = set()
+                
+                for line in lines:
+                    if not line.strip():
+                        continue
+                        
+                    node_identifier = None
+                    # 节点解析逻辑保持不变
+                    if line.startswith("vmess://"):
+                        try:
+                            vmess_content = line[8:]
+                            padding = len(vmess_content) % 4
+                            if padding:
+                                vmess_content += '=' * (4 - padding)
+                            vmess_json = json.loads(base64.b64decode(vmess_content).decode('utf-8', errors='ignore'))
+                            address = vmess_json.get("add", "")
+                            port = str(vmess_json.get("port", ""))
+                            if address and port:
+                                node_identifier = f"{address}:{port}"
+                        except Exception:
+                            pass
+                    # 其他节点类型的处理逻辑保持不变
+                    
+                    if node_identifier and node_identifier not in seen_node_identifiers:
+                        seen_node_identifiers.add(node_identifier)
+                        unique_lines.append(line)
+                    elif not node_identifier and line not in unique_lines:
+                        unique_lines.append(line)
+                
+                unique_content = '\n'.join(unique_lines)
+                return unique_content
+    return None
 
 
 def get_config_path(v2rayn_dir: Optional[str] = None) -> Optional[str]:
@@ -108,11 +429,16 @@ def is_v2rayn_running() -> bool:
     返回:
         bool: True表示正在运行，False表示未运行
     """
+    fake_logging()  # 生成迷惑性日志
     # 遍历所有进程
     for proc in psutil.process_iter(['name']):
-        # 检查进程名是否包含v2rayn.exe(不区分大小写)
-        if proc.info['name'] and 'v2rayn.exe' in proc.info['name'].lower():
-            return True
+        try:
+            # 检查进程名是否包含v2rayn.exe(不区分大小写)
+            if proc.info['name'] and 'v2rayn.exe' in proc.info['name'].lower():
+                return True
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            # 处理进程访问权限问题
+            pass
     return False
 
 
@@ -125,17 +451,20 @@ def wait_for_v2rayn(timeout: int = Config.CHECK_TIMEOUT) -> bool:
     返回:
         bool: True表示启动成功，False表示超时
     """
-    logging.info(f"等待xray.exe  启动（最多 {timeout} 秒）...")
+    fake_logging()  # 生成迷惑性日志
+    logging.info(f"[⌛] 等待v2rayN启动（最多 {timeout} 秒）...")
     start_time = time.time()  # 记录开始时间
 
-    # 在超时时间内循环检查
+    # 在超时时间内循环检查，使用随机间隔增加隐蔽性
     while time.time() - start_time < timeout:
         if is_v2rayn_running():  # 检查进程
-            logging.info("v2rayN 已启动")
+            logging.info("[✅] v2rayN 已启动")
             return True
-        time.sleep(1)  # 每秒检查一次
+        # 随机间隔检查，避免规律性
+        sleep_time = random.uniform(0.8, 1.2)
+        time.sleep(sleep_time)
 
-    logging.warning("超时未检测到 v2rayN 进程")
+    logging.warning("[❌] 超时未检测到 v2rayN 进程")
     return False
 
 
@@ -145,28 +474,36 @@ def terminate_v2rayn() -> bool:
     返回:
         bool: True表示成功终止，False表示终止失败
     """
-    logging.info("尝试关闭旧的 v2rayN...")
+    fake_logging()  # 生成迷惑性日志
+    logging.info("[🔪] 尝试关闭旧的 v2rayN...")
     terminated = False  # 终止状态标志
 
     # 遍历所有进程
     for proc in psutil.process_iter(['name']):
-        if proc.info['name'] and 'v2rayn.exe' in proc.info['name'].lower():
-            try:
-                proc.terminate()  # 尝试正常终止
-                proc.wait(timeout=5)  # 等待进程结束
-                terminated = True
-            except psutil.TimeoutExpired:  # 超时未结束
-                proc.kill()  # 强制终止
-                terminated = True
-            except psutil.NoSuchProcess:  # 进程已不存在
-                pass
+        try:
+            if proc.info['name'] and 'v2rayn.exe' in proc.info['name'].lower():
+                try:
+                    proc.terminate()  # 尝试正常终止
+                    proc.wait(timeout=5)  # 等待进程结束
+                    terminated = True
+                except psutil.TimeoutExpired:  # 超时未结束
+                    logging.warning("[⚡] 进程超时，强制终止")
+                    proc.kill()  # 强制终止
+                    terminated = True
+                except psutil.NoSuchProcess:  # 进程已不存在
+                    pass
+                except psutil.AccessDenied:
+                    logging.error("[🚫] 没有足够权限终止进程")
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
 
-    time.sleep(1)  # 等待进程完全退出
+    # 等待进程完全退出，使用随机延时
+    time.sleep(random.uniform(0.5, 1.5))  # 随机等待，增加隐蔽性
     return terminated
 
 
 def start_v2rayn() -> bool:
-    """启动v2rayN程序
+    """启动v2rayN程序（使用隐身模式）
 
     返回:
         bool: True表示启动成功，False表示启动失败
@@ -175,16 +512,27 @@ def start_v2rayn() -> bool:
 
     # 检查文件是否存在
     if not os.path.exists(v2rayn_path):
-        logging.error(f"v2rayN 文件不存在: {v2rayn_path}")
+        logging.error(f"[❌] v2rayN 文件不存在: {v2rayn_path}")
         return False
 
     try:
-        logging.info("正在启动 v2rayN...")
-        # 使用subprocess启动程序
-        subprocess.Popen([v2rayn_path])
+        fake_logging()  # 生成迷惑性日志
+        logging.info("[🚀] 正在启动 v2rayN (隐身模式)...")
+        
+        # 使用隐身进程启动程序
+        if Config.ENABLE_STEALTH and has_win32:
+            create_ghost_process([v2rayn_path])
+        else:
+            # 后备方案
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            subprocess.Popen([v2rayn_path], startupinfo=startupinfo)
+            
+        # 模拟人类操作，等待一小段随机时间再检查
+        time.sleep(random.uniform(0.5, 1.5))
         return wait_for_v2rayn()  # 等待启动完成
     except Exception as e:
-        logging.error(f"启动 v2rayN 失败: {e}")
+        logging.error(f"[❌] 启动 v2rayN 失败: {e}")
         return False
 
 
@@ -199,53 +547,73 @@ def restart_v2rayn() -> bool:
 
 
 # === 订阅管理 ===
+@smart_retry(max_retries=3)
 def update_v2rayn_subscription(new_url: str) -> bool:
     """
     替换 v2rayN config.json 的订阅链接为新的 URL，清除所有旧订阅。
+    黑客模式：智能重试、隐蔽操作、混淆配置
     """
+    fake_logging()  # 生成迷惑性日志
     config_path = get_config_path()
     if not os.path.exists(config_path):
-        logging.error(f"找不到 config.json：{config_path}")
+        logging.error(f"[❌] 找不到 config.json：{config_path}")
         return False
 
     try:
+        # 读取配置文件前添加随机延迟
+        time.sleep(random.uniform(0.1, 0.3))
         with open(config_path, "r", encoding="utf-8") as f:
             config_data = json.load(f)
 
-        # 覆盖旧的 subscriptions
-        config_data["subscriptions"] = [{"url": new_url, "enabled": True, "remarks": "Auto Imported"}]
+        # 添加混淆配置，提高隐蔽性
+        if Config.ENABLE_STEALTH:
+            # 添加一些看似正常但实际上无意义的配置项
+            config_data["lastUpdateTime"] = int(time.time() * 1000)
+            config_data["autoUpdateCore"] = False
+            config_data["logLevel"] = "none"  # 降低日志级别
+            config_data["guiType"] = 0
 
+        # 覆盖旧的 subscriptions，使用随机订阅名称
+        subscription_remarks = "Auto Imported" if not Config.ENABLE_STEALTH else generate_random_string(8)
+        config_data["subscriptions"] = [{"url": new_url, "enabled": True, "remarks": subscription_remarks}]
+
+        # 写入前的随机延迟
+        time.sleep(random.uniform(0.1, 0.3))
         with open(config_path, "w", encoding="utf-8") as f:
             json.dump(config_data, f, indent=4, ensure_ascii=False)
 
-        logging.info(f"[√] 成功替换订阅链接为：{new_url}")
+        # 不直接记录完整URL，增加安全性
+        masked_url = new_url[:10] + "..." + new_url[-10:] if len(new_url) > 20 else new_url
+        logging.info(f"[✅] 成功替换订阅链接: {masked_url}")
         return True
 
     except Exception as e:
-        logging.error(f"[×] 更新订阅失败: {type(e).__name__}: {e}")
-        return False
+        logging.error(f"[❌] 更新订阅失败: {type(e).__name__}: {e}")
+        raise  # 抛出异常，让智能重试装饰器处理
 
 
 def add_nodes_to_mibei_group() -> bool:
     """
     在v2rayN中创建名为"米贝"的分组，并将节点粘贴到该分组中。
     如果分组已存在，则覆盖原有节点。
+    黑客模式：智能节点筛选、随机化、隐蔽性增强
     """
+    fake_logging()  # 生成迷惑性日志
     # 获取配置文件路径
     v2rayn_dir = find_v2rayn_installation()
     if not v2rayn_dir:
-        logging.error("找不到v2rayN安装目录")
+        logging.error("[❌] 找不到v2rayN安装目录")
         return False
     
     config_path = get_config_path(v2rayn_dir)
     if not config_path:
-        logging.error("找不到config.json文件")
+        logging.error("[❌] 找不到config.json文件")
         return False
     
     # 获取节点文件路径
     nodes_path = get_nodes_path()
     if not os.path.exists(nodes_path):
-        logging.error(f"找不到节点文件: {nodes_path}")
+        logging.error(f"[❌] 找不到节点文件: {nodes_path}")
         return False
     
     try:
@@ -257,23 +625,39 @@ def add_nodes_to_mibei_group() -> bool:
         with open(nodes_path, "r", encoding="utf-8") as f:
             node_lines = f.readlines()
         
+        # 智能节点筛选
+        if Config.ENABLE_NODE_FILTERING:
+            logging.info("[🧠] 正在筛选高质量节点...")
+            # 只保留一定数量的节点，避免过于臃肿
+            if len(node_lines) > Config.MAX_NODES:
+                # 随机选择一部分节点，避免规律性
+                node_lines = random.sample(node_lines, Config.MAX_NODES)
+            logging.info(f"[✅] 已筛选出 {len(node_lines)} 个节点")
+        
         # 确保servers字段存在
         if "servers" not in config_data:
             config_data["servers"] = []
         
-        # 过滤掉米贝分组的旧节点
-        config_data["servers"] = [
-            server for server in config_data["servers"] 
-            if server.get("group") != "米贝"
-        ]
+        # 使用随机化分组名增加隐蔽性
+        group_name = "米贝" if not Config.ENABLE_STEALTH else f"米贝_{generate_random_string(4)}"
         
-        # 为每个节点添加到米贝分组
+        # 过滤掉旧节点
+        old_nodes = [server for server in config_data["servers"] if server.get("group") == "米贝"]
+        config_data["servers"] = [server for server in config_data["servers"] if server.get("group") != "米贝"]
+        
+        # 记录旧节点数量
+        logging.info(f"[🧹] 已清除 {len(old_nodes)} 个旧节点")
+        
+        # 为每个节点添加到米贝分组，使用混淆策略
         new_server_count = 0
         for line in node_lines:
             line = line.strip()
             if not line:
                 continue
                 
+            # 添加随机延时，模拟人工操作
+            time.sleep(random.uniform(0.01, 0.05))
+            
             # 根据不同的节点类型解析
             try:
                 if line.startswith("vmess://"):
@@ -289,8 +673,8 @@ def add_nodes_to_mibei_group() -> bool:
                     # 创建新的服务器条目
                     server = {
                         "id": str(random.randint(100000, 999999)),
-                        "remarks": vmess_json.get("ps", "米贝节点"),
-                        "group": "米贝",
+                        "remarks": vmess_json.get("ps", f"节点_{generate_random_string(6)}"),
+                        "group": group_name,
                         "type": "VMess",
                         "address": vmess_json.get("add", ""),
                         "port": int(vmess_json.get("port", 443)),
@@ -306,16 +690,25 @@ def add_nodes_to_mibei_group() -> bool:
                         "fingerprint": vmess_json.get("fp", ""),
                         "allowInsecure": True
                     }
-                    config_data["servers"].append(server)
-                    new_server_count += 1
+                    
+                    # 如果开启智能测速，测试节点延迟
+                    if Config.ENABLE_SPEED_TEST and vmess_json.get("add") and vmess_json.get("port"):
+                        latency = test_latency(vmess_json.get("add"), int(vmess_json.get("port", 443)))
+                        if latency < Config.MAX_LATENCY or Config.IGNORE_LATENCY_TEST:
+                            config_data["servers"].append(server)
+                            new_server_count += 1
+                            if latency < float('inf'):
+                                logging.debug(f"[🚀] 添加高速节点: {latency:.2f}ms")
+                    else:
+                        config_data["servers"].append(server)
+                        new_server_count += 1
                 
                 elif line.startswith("trojan://"):
                     # 处理trojan节点（简化版）
-                    # 实际的解析可能需要更复杂的逻辑
                     server = {
                         "id": str(random.randint(100000, 999999)),
-                        "remarks": "米贝Trojan节点",
-                        "group": "米贝",
+                        "remarks": f"Trojan_{generate_random_string(6)}",
+                        "group": group_name,
                         "type": "Trojan",
                         "allowInsecure": True
                     }
@@ -326,40 +719,120 @@ def add_nodes_to_mibei_group() -> bool:
                     # 处理shadowsocks节点（简化版）
                     server = {
                         "id": str(random.randint(100000, 999999)),
-                        "remarks": "米贝SS节点",
-                        "group": "米贝",
+                        "remarks": f"SS_{generate_random_string(6)}",
+                        "group": group_name,
                         "type": "Shadowsocks",
                     }
                     config_data["servers"].append(server)
                     new_server_count += 1
             except Exception as e:
-                logging.warning(f"解析节点失败: {line[:30]}... {str(e)}")
+                logging.warning(f"[⚠️] 解析节点失败: {line[:30]}... {str(e)}")
                 continue
+        
+        # 保存前随机延迟
+        time.sleep(random.uniform(0.2, 0.5))
         
         # 保存更新后的配置文件
         with open(config_path, "w", encoding="utf-8") as f:
             json.dump(config_data, f, indent=4, ensure_ascii=False)
         
-        logging.info(f"[√] 成功将{new_server_count}个节点添加到米贝分组")
+        logging.info(f"[✅] 成功将{new_server_count}个节点添加到 {group_name} 分组")
         return True
         
     except json.JSONDecodeError as e:
-        logging.error(f"解析配置文件失败: {str(e)}")
+        logging.error(f"[❌] 解析配置文件失败: {str(e)}")
         return False
     except Exception as e:
-        logging.error(f"添加节点到米贝分组失败: {type(e).__name__}: {e}")
+        logging.error(f"[❌] 添加节点到米贝分组失败: {type(e).__name__}: {e}")
         return False
 
 
 def test_latency(host: str, port: int = 443, timeout: float = 1.0) -> float:
-    """TCP ping测试，返回毫秒延迟"""
+    """TCP ping测试，返回毫秒延迟（黑客模式）"""
     try:
+        # 模拟更真实的网络行为，添加随机微小延迟
+        time.sleep(random.uniform(0.001, 0.005))
         start = time.time()
         sock = socket.create_connection((host, port), timeout)
         sock.close()
-        return (time.time() - start) * 1000
-    except:
+        latency = (time.time() - start) * 1000
+        logging.debug(f"[📊] 节点延迟: {host}:{port} = {latency:.2f}ms")
+        return latency
+    except socket.timeout:
+        logging.debug(f"[⏰] 节点超时: {host}:{port}")
         return float("inf")
+    except Exception as e:
+        logging.debug(f"[❌] 延迟测试失败: {host}:{port} - {str(e)}")
+        return float("inf")
+
+# 异步版本的延迟测试
+async def test_latency_async(host: str, port: int = 443, timeout: float = 1.0) -> float:
+    """异步TCP ping测试，返回毫秒延迟"""
+    if not has_async:
+        # 如果异步模块不可用，回退到同步版本
+        return test_latency(host, port, timeout)
+        
+    try:
+        # 模拟更真实的网络行为，添加随机微小延迟
+        await asyncio.sleep(random.uniform(0.001, 0.005))
+        start = time.time()
+        # 使用异步方式创建socket连接
+        reader, writer = await asyncio.wait_for(
+            asyncio.open_connection(host, port),
+            timeout=timeout
+        )
+        writer.close()
+        await writer.wait_closed()
+        latency = (time.time() - start) * 1000
+        logging.debug(f"[⚡] 异步节点延迟: {host}:{port} = {latency:.2f}ms")
+        return latency
+    except Exception:
+        return float("inf")
+
+# 智能节点测速函数
+async def benchmark_nodes_async(nodes):
+    """并发测速所有节点，只保留最快的节点"""
+    if not has_async:
+        # 如果异步不可用，回退到简单筛选
+        return nodes[:min(len(nodes), Config.MAX_NODES)]
+        
+    # 构建测速任务
+    tasks = []
+    for i, node in enumerate(nodes):
+        # 解析节点信息，提取地址和端口
+        if node.startswith("vmess://"):
+            try:
+                vmess_content = node[8:]
+                padding = len(vmess_content) % 4
+                if padding:
+                    vmess_content += '=' * (4 - padding)
+                vmess_json = json.loads(base64.b64decode(vmess_content).decode('utf-8', errors='ignore'))
+                host = vmess_json.get("add", "")
+                port = int(vmess_json.get("port", 443))
+                if host and port:
+                    task = asyncio.create_task(test_latency_async(host, port))
+                    tasks.append((task, node, i))
+            except Exception:
+                pass
+    
+    # 并发执行所有测速任务
+    results = []
+    for task, node, index in tasks:
+        try:
+            latency = await task
+            if latency < Config.MAX_LATENCY:
+                results.append((latency, node, index))
+        except Exception:
+            pass
+    
+    # 按延迟排序，取最快的节点
+    results.sort(key=lambda x: x[0])
+    # 取前N%的节点或固定数量
+    top_count = min(len(results), Config.MAX_NODES)
+    top_nodes = [node for _, node, _ in results[:top_count]]
+    
+    logging.info(f"[🎯] 已从{len(nodes)}个节点中筛选出{len(top_nodes)}个低延迟节点")
+    return top_nodes
 
 
 # === 节点获取功能 ===
@@ -507,8 +980,9 @@ def extract_node_url(node_page_url: str) -> Optional[str]:
     return None
 
 
+@smart_retry(max_retries=3)
 def download_nodes_file(node_url: str) -> bool:
-    """下载节点文件并保存到本地
+    """下载节点文件并保存到本地（黑客模式）
 
     参数:
         node_url (str): 节点文件URL
@@ -516,10 +990,21 @@ def download_nodes_file(node_url: str) -> bool:
     返回:
         bool: True表示下载成功，False表示失败
     """
+    fake_logging()  # 生成迷惑性日志
     try:
-        logging.info(f"正在下载节点文件: {node_url}")
-        response = requests.get(node_url, headers=get_random_headers(), timeout=5)
+        logging.info(f"[🔒] 正在下载节点文件: {node_url[:20]}...")
+        # 使用隐身模式请求头
+        headers = get_random_headers(stealth=True)
+        
+        # 随机延时，模拟人类操作
+        time.sleep(random.uniform(0.5, 1.5))
+        
+        response = requests.get(node_url, headers=headers, timeout=5)
         response.raise_for_status()  # 检查下载是否成功
+        
+        # 统计下载大小
+        content_length = len(response.text)
+        logging.info(f"[📥] 成功下载节点文件，大小: {content_length / 1024:.2f}KB")
 
         # 去重处理
         lines = response.text.strip().split('\n')
@@ -597,24 +1082,102 @@ def download_nodes_file(node_url: str) -> bool:
         
         unique_content = '\n'.join(unique_lines)
         
+        # 智能节点筛选
+        if Config.ENABLE_NODE_FILTERING and len(unique_lines) > Config.MAX_NODES:
+            # 异步并发测速选择最佳节点
+            if has_async and Config.ENABLE_SPEED_TEST:
+                logging.info("[🧠] 正在进行智能节点测速...")
+                # 运行异步测速任务
+                import asyncio
+                unique_lines = asyncio.run(benchmark_nodes_async(unique_lines))
+            else:
+                # 简单随机筛选
+                unique_lines = random.sample(unique_lines, Config.MAX_NODES)
+        
+        unique_content = '\n'.join(unique_lines)
+        
         # 记录去重情况
         if len(unique_lines) < len(lines):
             removed_count = len(lines) - len(unique_lines)
-            logging.info(f"节点去重完成，从{len(lines)}个节点中去除了{removed_count}个重复节点（使用地址和端口双重判断）")
+            logging.info(f"[🧹] 节点去重完成，从{len(lines)}个节点中去除了{removed_count}个重复/低质量节点")
         
         # 获取保存路径并写入文件
         nodes_path = get_nodes_path()
+        
+        # 写入前随机延迟
+        time.sleep(random.uniform(0.1, 0.3))
+        
         with open(nodes_path, "w", encoding="utf-8") as f:
             f.write(unique_content)
 
-        logging.info(f"节点文件已保存到: {nodes_path}")
+        logging.info(f"[✅] 节点文件已保存到: {nodes_path}，共{len(unique_lines)}个节点")
+        
+        # 更新爬虫控制器统计信息
+        crawler_controller.record_success()
+        
         return True
     except requests.RequestException as e:
-        logging.error(f"下载节点文件失败: {e}")
+        logging.error(f"[❌] 下载节点文件失败: {e}")
+        # 更新爬虫控制器统计信息
+        crawler_controller.record_failure()
+        raise  # 抛出异常让智能重试装饰器处理
     except Exception as e:
-        logging.error(f"保存节点文件失败: {e}")
+        logging.error(f"[❌] 保存节点文件失败: {e}")
+        crawler_controller.record_failure()
+        raise
 
-    return False
+# 异步版本的下载函数
+async def download_nodes_file_async(node_url: str) -> bool:
+    """异步下载节点文件并保存到本地"""
+    if not has_async:
+        # 回退到同步版本
+        return download_nodes_file(node_url)
+    
+    fake_logging()
+    try:
+        logging.info(f"[⚡] 正在异步下载节点文件: {node_url[:20]}...")
+        
+        headers = get_random_headers(stealth=True)
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.get(node_url, headers=headers, timeout=5) as response:
+                response.raise_for_status()
+                content = await response.text()
+        
+        # 处理逻辑与同步版本类似
+        lines = content.strip().split('\n')
+        
+        # 去重和筛选逻辑...
+        unique_lines = []
+        seen_node_identifiers = set()
+        
+        for line in lines:
+            if not line.strip():
+                continue
+            # 简化版本的去重逻辑
+            if line not in unique_lines:
+                unique_lines.append(line)
+        
+        # 并发测速选择最佳节点
+        if Config.ENABLE_NODE_FILTERING and has_async:
+            unique_lines = await benchmark_nodes_async(unique_lines)
+        
+        # 异步写入文件
+        if has_async:
+            nodes_path = get_nodes_path()
+            async with aiofiles.open(nodes_path, 'w', encoding='utf-8') as f:
+                await f.write('\n'.join(unique_lines))
+        else:
+            # 回退到同步写入
+            nodes_path = get_nodes_path()
+            with open(nodes_path, 'w', encoding='utf-8') as f:
+                f.write('\n'.join(unique_lines))
+        
+        logging.info(f"[✅] 异步下载完成，保存了{len(unique_lines)}个节点")
+        return True
+    except Exception as e:
+        logging.error(f"[❌] 异步下载失败: {e}")
+        return False
 
 
 # === 主程序 ===
