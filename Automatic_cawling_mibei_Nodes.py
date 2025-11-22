@@ -1065,7 +1065,7 @@ def extract_node_url(node_page_url: str) -> Optional[str]:
         response.raise_for_status()
 
         # 使用正则表达式匹配.txt文件链接
-        txt_pattern = re.compile(r'http[s]?://mm\.mibei77\.com/\d{6}/[\w\.]+\.txt', re.IGNORECASE)
+        txt_pattern = re.compile(r'http[s]?://mm\.mibei77\.com/(?:\d{6}|\d{4}\.\d{2})/[\w\.]+\.(?:txt|yaml)', re.IGNORECASE)
         txt_links = txt_pattern.findall(response.text)  # 查找所有匹配的URL
 
         if txt_links:
