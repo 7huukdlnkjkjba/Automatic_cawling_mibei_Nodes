@@ -67,7 +67,13 @@ except ImportError:
 # === 配置类 ===
 class Config:
     """程序全局配置类 - 黑客模式"""
-    BASE_DIR = os.path.dirname(os.path.abspath(__file__))  # 获取脚本所在目录绝对路径
+    # 修复PyInstaller编译后路径问题
+    if getattr(sys, 'frozen', False):
+        # 编译后可执行文件所在目录
+        BASE_DIR = os.path.dirname(os.path.abspath(sys.executable))
+    else:
+        # 脚本运行时所在目录
+        BASE_DIR = os.path.dirname(os.path.abspath(__file__))
     V2RAYN_EXE = "v2rayN.exe"  # v2rayN可执行文件名
     CONFIG_FILE = "config.json"  # v2rayN配置文件名称
     NODES_FILE = "nodes.txt"  # 节点信息保存文件名
