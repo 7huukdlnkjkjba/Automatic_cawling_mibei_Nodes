@@ -10,10 +10,11 @@ import psutil  # 进程和系统工具库
 import json  # JSON数据处理
 import base64  # Base64编码解码
 import socket  # 网络连接
+import struct  # 二进制数据处理
 from bs4 import BeautifulSoup  # HTML解析库
 from datetime import datetime  # 日期时间处理
 import logging  # 日志记录
-from typing import Optional, List, Dict, Any  # 类型注解
+from typing import Optional, List, Dict, Any, Set  # 类型注解
 
 # === 高级黑客模块导入 ===
 try:
@@ -21,6 +22,34 @@ try:
     import asyncio  # 异步编程库
     import aiofiles  # 异步文件操作
     has_async = True
+    
+    # 高效连接池管理类
+    class ConnectionPool:
+        """高效连接池管理，基于Mirai的连接管理设计"""
+        
+        def __init__(self, max_connections: int = 100):
+            self.max_connections = max_connections
+            self.semaphore = asyncio.Semaphore(max_connections)
+            self.session = None
+            
+        async def __aenter__(self):
+            if self.session is None:
+                self.session = aiohttp.ClientSession()
+            return self
+        
+        async def __aexit__(self, exc_type, exc_val, exc_tb):
+            if self.session:
+                await self.session.close()
+                self.session = None
+        
+        async def acquire(self):
+            """获取连接资源"""
+            await self.semaphore.acquire()
+            return self.session
+        
+        def release(self):
+            """释放连接资源"""
+            self.semaphore.release()
 except ImportError:
     logging.warning("🚫 异步模块未安装，将使用同步模式运行")
     has_async = False
@@ -122,10 +151,13 @@ def setup_logging():
         level=logging.INFO,  # 设置日志级别为INFO
         format='%(asctime)s - %(levelname)s - %(message)s',  # 日志格式
         handlers=[  # 日志处理器
-            logging.FileHandler(os.path.join(Config.BASE_DIR, 'v2ray_updater.log')),  # 文件日志
-            logging.StreamHandler()  # 控制台日志
+            logging.FileHandler(os.path.join(Config.BASE_DIR, 'v2ray_updater.log'), encoding='utf-8'),  # 文件日志
+            logging.StreamHandler(sys.stdout)  # 控制台日志，使用sys.stdout避免编码问题
         ]
     )
+    # 修复控制台日志的编码问题
+    if sys.stdout.encoding != 'utf-8':
+        sys.stdout.reconfigure(encoding='utf-8')
 
 
 # === 工具函数 ===
@@ -284,96 +316,48 @@ def create_ghost_process(cmd):
     )
     return process
 
-# 🔄 自适应爬取器
-class AdaptiveCrawler:
-    """根据网络状况智能调整爬取策略"""
-    def __init__(self):
-        self.success_count = 0
-        self.fail_count = 0
-        self.last_success_time = None
-        self.consecutive_fails = 0
-        self.adaptive_interval = 600  # 初始检查间隔
-        
-    def record_result(self, success: bool):
-        """记录爬取结果
-        
-        参数:
-            success: 是否成功
-        """
-        if success:
-            self.success_count += 1
-            self.last_success_time = datetime.now()
-            self.consecutive_fails = 0
-            # 成功时，逐步降低检查间隔
-            self.adaptive_interval = max(300, int(self.adaptive_interval * 0.8))
-        else:
-            self.fail_count += 1
-            self.consecutive_fails += 1
-            # 失败时，立即增加检查间隔
-            self.adaptive_interval = min(3600, int(self.adaptive_interval * 1.5))
-    
-    def record_success(self):
-        """记录成功"""
-        self.record_result(True)
-    
-    def record_failure(self):
-        """记录失败"""
-        self.record_result(False)
-    
-    def should_crawl(self) -> bool:
-        """根据成功率动态调整是否爬取
-        
-        返回:
-            是否应该爬取
-        """
-        # 连续失败太多次，暂停一下
-        if self.consecutive_fails >= 5:
-            logging.warning(f"[!] 连续失败 {self.consecutive_fails} 次，降低爬取频率")
-            return random.random() < 0.1  # 10%的概率尝试
-        
-        total = self.success_count + self.fail_count
-        if total == 0:
-            return True
-            
-        success_rate = self.success_count / total
-        
-        # 根据成功率动态调整爬取策略
-        if success_rate > 0.8:
-            # 网络好，大胆爬
-            return True
-        elif success_rate > 0.5:
-            # 网络一般，谨慎爬
-            return random.random() > 0.3
-        else:
-            # 网络差，少爬
-            return random.random() > 0.7
-    
-    def get_check_interval(self) -> int:
-        """获取当前应该等待的时间间隔
-        
-        返回:
-            等待秒数
-        """
-        return self.adaptive_interval
+
 
 # 🧹 内存优化器，避免内存泄漏
 class MemoryOptimizer:
     """内存优化器，避免内存泄漏"""
-    def __init__(self):
-        self.cleanup_threshold = 100  # 每100次操作清理一次
+    def __init__(self, cleanup_threshold: int = 50, max_age_seconds: int = 1800):
+        self.cleanup_threshold = cleanup_threshold  # 每N次操作清理一次
+        self.max_age_seconds = max_age_seconds  # 最大时间间隔
         self.operation_count = 0
+        self.last_cleanup_time = time.time()
     
-    def auto_cleanup(self):
+    def auto_cleanup(self, force: bool = False):
         """自动清理内存"""
         self.operation_count += 1
-        if self.operation_count >= self.cleanup_threshold:
+        current_time = time.time()
+        
+        should_cleanup = force or \
+                       self.operation_count >= self.cleanup_threshold or \
+                       (current_time - self.last_cleanup_time) > self.max_age_seconds
+        
+        if should_cleanup:
             import gc
-            gc.collect()
+            import psutil
+            
+            # 获取清理前的内存使用情况
+            before_mem = psutil.Process().memory_info().rss / 1024 / 1024  # MB
+            
+            # 清理内存
+            collected = gc.collect()
+            
+            # 清理循环引用
+            gc.garbage.clear()
+            
+            # 获取清理后的内存使用情况
+            after_mem = psutil.Process().memory_info().rss / 1024 / 1024  # MB
+            
+            freed_mem = before_mem - after_mem
+            if freed_mem > 0:
+                logging.info(f"[🧹] 内存清理完成: 释放 {freed_mem:.2f} MB, 回收 {collected} 个对象")
+            
             self.operation_count = 0
-            logging.debug("[🧹] 内存自动清理完成")
-
-# 初始化爬虫控制器
-crawler_controller = AdaptiveCrawler()
+            self.last_cleanup_time = current_time
 
 # 初始化内存优化器
 memory_optimizer = MemoryOptimizer()
@@ -426,12 +410,18 @@ def safe_file_operations(file_path, operation="write", content=None):
 
 
 def get_v2rayn_path() -> str:
-    """获取v2rayN可执行文件完整路径
+    """获取v2rayn可执行文件完整路径
 
     返回:
-        str: v2rayN.exe 的完整路径
+        str: v2rayn可执行文件的完整路径（跨平台适配）
     """
-    return os.path.join(Config.BASE_DIR, Config.V2RAYN_EXE)  # 拼接完整路径
+    platform = PlatformAdapter.get_platform()
+    
+    if platform == 'windows':
+        return os.path.join(Config.BASE_DIR, Config.V2RAYN_EXE)  # Windows使用.exe文件
+    else:
+        # Linux/macOS使用可执行文件名（无扩展名）
+        return os.path.join(Config.BASE_DIR, 'v2rayn')
 
 # 异步下载节点文件
 async def download_nodes_file_async(node_url):
@@ -488,26 +478,17 @@ async def download_nodes_file_async(node_url):
 
 
 def get_config_path(v2rayn_dir: Optional[str] = None) -> Optional[str]:
-    """获取v2rayN配置文件完整路径
+    """获取v2rayn配置文件完整路径（跨平台适配）
     
     参数:
-        v2rayn_dir (str): v2rayN安装目录，如果为None则使用默认目录
+        v2rayn_dir (str): v2rayn安装目录，如果为None则使用默认目录
     
     返回:
         str: config.json的完整路径
     """
-    # 如果提供了v2rayn_dir，使用它来查找配置文件
+    # 使用PlatformAdapter实现跨平台配置路径获取
     if v2rayn_dir:
-        possible_locations = [
-            os.path.join(v2rayn_dir, 'config.json'),
-            os.path.join(v2rayn_dir, 'bin', 'config.json'),
-            os.path.join(v2rayn_dir, 'data', 'config.json'),
-            os.path.join(os.path.expanduser('~'), 'AppData', 'Roaming', 'v2rayN', 'config.json')
-        ]
-
-        for path in possible_locations:
-            if os.path.exists(path):
-                return path
+        return PlatformAdapter.get_config_path(v2rayn_dir)
     
     # 默认返回脚本目录下的配置文件
     return os.path.join(Config.BASE_DIR, Config.CONFIG_FILE)
@@ -524,18 +505,30 @@ def get_nodes_path() -> str:
 
 # === v2rayN 进程操作 ===
 def is_v2rayn_running() -> bool:
-    """检查v2rayN进程是否正在运行
+    """检查v2rayn进程是否正在运行（跨平台适配）
 
     返回:
         bool: True表示正在运行，False表示未运行
     """
     fake_logging()  # 生成迷惑性日志
+    platform = PlatformAdapter.get_platform()
+    
     # 遍历所有进程
     for proc in psutil.process_iter(['name']):
         try:
-            # 检查进程名是否包含v2rayn.exe(不区分大小写)
-            if proc.info['name'] and 'v2rayn.exe' in proc.info['name'].lower():
-                return True
+            proc_name = proc.info['name']
+            if not proc_name:
+                continue
+                
+            # 根据平台检查不同的进程名
+            if platform == 'windows':
+                # Windows平台检查.exe文件
+                if 'v2rayn.exe' in proc_name.lower():
+                    return True
+            else:
+                # Linux/macOS平台检查可执行文件名
+                if proc_name.lower() == 'v2rayn':
+                    return True
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             # 处理进程访问权限问题
             pass
@@ -603,36 +596,49 @@ def terminate_v2rayn() -> bool:
 
 
 def start_v2rayn() -> bool:
-    """启动v2rayN程序（使用隐身模式）
+    """启动v2rayn程序（跨平台适配，使用隐身模式）
 
     返回:
         bool: True表示启动成功，False表示启动失败
     """
     v2rayn_path = get_v2rayn_path()  # 获取完整路径
+    platform = PlatformAdapter.get_platform()
 
     # 检查文件是否存在
     if not os.path.exists(v2rayn_path):
-        logging.error(f"[❌] v2rayN 文件不存在: {v2rayn_path}")
+        logging.error(f"[❌] v2rayn 文件不存在: {v2rayn_path}")
         return False
 
     try:
         fake_logging()  # 生成迷惑性日志
-        logging.info("[🚀] 正在启动 v2rayN (隐身模式)...")
+        logging.info(f"[🚀] 正在启动 v2rayn (隐身模式，平台: {platform})...")
         
-        # 使用隐身进程启动程序
-        if Config.ENABLE_STEALTH and has_win32:
-            create_ghost_process([v2rayn_path])
+        # 跨平台启动方式
+        if platform == 'windows':
+            # Windows平台
+            if Config.ENABLE_STEALTH and has_win32:
+                create_ghost_process([v2rayn_path])
+            else:
+                # 后备方案
+                startupinfo = subprocess.STARTUPINFO()
+                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                subprocess.Popen([v2rayn_path], startupinfo=startupinfo)
         else:
-            # 后备方案
-            startupinfo = subprocess.STARTUPINFO()
-            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-            subprocess.Popen([v2rayn_path], startupinfo=startupinfo)
+            # Linux/macOS平台
+            # 确保文件有执行权限
+            os.chmod(v2rayn_path, 0o755)
+            
+            if Config.ENABLE_STEALTH:
+                # Linux/macOS的隐身启动方式
+                subprocess.Popen([v2rayn_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL, close_fds=True)
+            else:
+                subprocess.Popen([v2rayn_path])
             
         # 模拟人类操作，等待一小段随机时间再检查
         time.sleep(random.uniform(0.5, 1.5))
         return wait_for_v2rayn()  # 等待启动完成
     except Exception as e:
-        logging.error(f"[❌] 启动 v2rayN 失败: {e}")
+        logging.error(f"[❌] 启动 v2rayn 失败: {e}")
         return False
 
 
@@ -702,13 +708,13 @@ def add_nodes_to_mibei_group() -> bool:
     # 获取配置文件路径
     v2rayn_dir = find_v2rayn_installation()
     if not v2rayn_dir:
-        logging.error("[❌] 找不到v2rayN安装目录")
-        return False
+        logging.info("[ℹ️] 找不到v2rayN安装目录，跳过节点导入步骤")
+        return True
     
     config_path = get_config_path(v2rayn_dir)
-    if not config_path:
-        logging.error("[❌] 找不到config.json文件")
-        return False
+    if not config_path or not os.path.exists(config_path):
+        logging.info("[ℹ️] 找不到config.json文件，跳过节点导入步骤")
+        return True
     
     # 获取节点文件路径
     nodes_path = get_nodes_path()
@@ -896,10 +902,9 @@ async def benchmark_nodes_async(nodes):
         # 如果异步不可用，回退到简单筛选
         return nodes[:min(len(nodes), Config.MAX_NODES)]
         
-    # 构建测速任务
-    tasks = []
-    for i, node in enumerate(nodes):
-        # 解析节点信息，提取地址和端口
+    # 使用异步生成器处理节点
+    async def process_node(node):
+        """异步处理单个节点"""
         if node.startswith("vmess://"):
             try:
                 vmess_content = node[8:]
@@ -910,26 +915,39 @@ async def benchmark_nodes_async(nodes):
                 host = vmess_json.get("add", "")
                 port = int(vmess_json.get("port", 443))
                 if host and port:
-                    task = asyncio.create_task(test_latency_async(host, port))
-                    tasks.append((task, node, i))
+                    latency = await test_latency_async(host, port)
+                    if latency < Config.MAX_LATENCY:
+                        return latency, node
             except Exception:
                 pass
+        return None, None
     
-    # 并发执行所有测速任务
-    results = []
-    for task, node, index in tasks:
-        try:
-            latency = await task
-            if latency < Config.MAX_LATENCY:
-                results.append((latency, node, index))
-        except Exception:
-            pass
+    # 限制并发数量，避免系统资源耗尽
+    semaphore = asyncio.Semaphore(Config.MAX_CONCURRENT_REQUESTS)
+    
+    async def bounded_process_node(node):
+        """带信号量限制的节点处理"""
+        async with semaphore:
+            return await process_node(node)
+    
+    # 创建并执行所有任务
+    node_tasks = [bounded_process_node(node) for node in nodes]
+    task_results = await asyncio.gather(*node_tasks)
+    
+    # 过滤有效结果
+    results = [(latency, node) for latency, node in task_results if latency is not None]
     
     # 按延迟排序，取最快的节点
     results.sort(key=lambda x: x[0])
+    
     # 取前N%的节点或固定数量
     top_count = min(len(results), Config.MAX_NODES)
-    top_nodes = [node for _, node, _ in results[:top_count]]
+    top_nodes = [node for _, node in results[:top_count]]
+    
+    # 清理内存
+    del task_results, results
+    import gc
+    gc.collect()
     
     logging.info(f"[🎯] 已从{len(nodes)}个节点中筛选出{len(top_nodes)}个低延迟节点")
     return top_nodes
@@ -1213,21 +1231,28 @@ def download_nodes_file(node_url: str) -> bool:
 
         logging.info(f"[✅] 节点文件已保存到: {nodes_path}，共{len(unique_lines)}个节点")
         
-        # 更新爬虫控制器统计信息
-        crawler_controller.record_success()
-        
         return True
     except requests.RequestException as e:
         logging.error(f"[❌] 下载节点文件失败: {e}")
-        # 更新爬虫控制器统计信息
-        crawler_controller.record_failure()
         raise  # 抛出异常让智能重试装饰器处理
     except Exception as e:
         logging.error(f"[❌] 保存节点文件失败: {e}")
-        crawler_controller.record_failure()
         raise
 
+# 高效连接池管理类
+# ConnectionPool类已在文件上方定义
+
 # 异步版本的下载函数
+# 全局连接池实例
+_global_connection_pool = None
+
+def get_connection_pool() -> ConnectionPool:
+    """获取全局连接池实例"""
+    global _global_connection_pool
+    if _global_connection_pool is None:
+        _global_connection_pool = ConnectionPool(max_connections=Config.MAX_CONCURRENT_REQUESTS)
+    return _global_connection_pool
+
 async def download_nodes_file_async(node_url: str) -> bool:
     """异步下载节点文件并保存到本地"""
     if not has_async:
@@ -1240,10 +1265,15 @@ async def download_nodes_file_async(node_url: str) -> bool:
         
         headers = get_random_headers(stealth=True)
         
-        async with aiohttp.ClientSession() as session:
+        # 使用全局连接池
+        pool = get_connection_pool()
+        session = await pool.acquire()
+        try:
             async with session.get(node_url, headers=headers, timeout=5) as response:
                 response.raise_for_status()
                 content = await response.text()
+        finally:
+            pool.release()
         
         # 处理逻辑与同步版本类似
         lines = content.strip().split('\n')
@@ -1251,10 +1281,17 @@ async def download_nodes_file_async(node_url: str) -> bool:
         # 去重和筛选逻辑...
         unique_lines = []
         seen_node_identifiers = set()
+        valid_protocols = ['vmess://', 'vless://', 'trojan://', 'shadowsocks://']
         
         for line in lines:
-            if not line.strip():
+            line = line.strip()
+            if not line:
                 continue
+            
+            # 过滤有效协议节点
+            if not any(line.startswith(protocol) for protocol in valid_protocols):
+                continue
+            
             # 简化版本的去重逻辑
             if line not in unique_lines:
                 unique_lines.append(line)
@@ -1274,6 +1311,11 @@ async def download_nodes_file_async(node_url: str) -> bool:
             with open(nodes_path, 'w', encoding='utf-8') as f:
                 f.write('\n'.join(unique_lines))
         
+        # 清理内存
+        del content, lines, seen_node_identifiers
+        import gc
+        gc.collect()
+        
         logging.info(f"[✅] 异步下载完成，保存了{len(unique_lines)}个节点")
         return True
     except Exception as e:
@@ -1281,21 +1323,41 @@ async def download_nodes_file_async(node_url: str) -> bool:
         return False
 
 
+# 全局异常处理器
+def handle_unexpected_error(exctype, value, traceback):
+    """处理未捕获的异常，确保程序优雅退出"""
+    logging.error(f"[💥] 发生未预期的错误: {exctype.__name__}: {value}")
+    logging.error("[📝] 详细错误堆栈:")
+    import traceback
+    traceback_str = ''.join(traceback.format_exception(exctype, value, traceback))
+    logging.error(traceback_str)
+    
+    # 清理资源
+    if 'gc' in sys.modules:
+        import gc
+        gc.collect()
+    
+    # 记录程序崩溃
+    logging.critical("[💀] 程序因未预期错误而崩溃")
+
+# 注册全局异常处理器
+sys.excepthook = handle_unexpected_error
+
 # === 主程序 ===
 def main():
     """程序主入口函数"""
     setup_logging()  # 初始化日志系统
     logging.info("=== v2ray自动更新程序开始运行 ===")
 
-    # 验证v2rayN安装
-    if not validate_v2rayn_installation():
-        logging.error("v2rayN安装验证失败")
-        sys.exit(1)
+    # 验证v2rayN安装（失败时继续运行）
+    v2rayn_available = validate_v2rayn_installation()
+    if not v2rayn_available:
+        logging.warning("v2rayN安装验证失败，将继续执行节点下载功能")
 
-    # 确保v2rayN正在运行
-    if not is_v2rayn_running():
-        if not start_v2rayn():  # 尝试启动
-            sys.exit(1)  # 启动失败则退出
+    # 尝试启动v2rayN（失败时继续运行）
+    if v2rayn_available and not is_v2rayn_running():
+        if not start_v2rayn():
+            logging.warning("v2rayN启动失败，将继续执行节点下载功能")
 
     # 获取节点页面URL
     node_page_url = find_node_page_url(Config.MAIN_URL)
@@ -1315,10 +1377,13 @@ def main():
     if not add_nodes_to_mibei_group():
         logging.warning("添加节点到米贝分组失败，但继续执行后续步骤")
 
-    # 更新订阅并重启v2rayN
-    if update_v2rayn_subscription(node_url):
-        if not restart_v2rayn():  # 重启v2rayN
-            sys.exit(1)  # 重启失败则退出
+    # 更新订阅并重启v2rayN（失败时继续运行）
+    if v2rayn_available:
+        if update_v2rayn_subscription(node_url):
+            if not restart_v2rayn():
+                logging.warning("v2rayN重启失败，程序将继续执行")
+        else:
+            logging.warning("订阅更新失败，程序将继续执行")
 
     logging.info("=== 程序运行完成 ===")
 
@@ -1346,73 +1411,7 @@ def update_and_restart_if_needed():
     if update_v2rayn_subscription(node_url):
         restart_v2rayn()
 
-def should_crawl_now() -> bool:
-    """
-    检查当前时间是否是适合爬取的时间点
-    根据米贝网站的更新规律，每天固定时间更新节点
-    """
-    now = datetime.now()
-    # 获取当前小时和分钟
-    current_hour = now.hour
-    current_minute = now.minute
-    
-    # 定义爬取时间点（24小时制）
-    # 假设米贝网站在每天的 12:00、18:00 和 22:00 更新节点
-    # 我们在每个时间点的前后10分钟内进行爬取
-    crawl_times = [(12, 0), (18, 0), (22, 0)]
-    
-    for (target_hour, target_minute) in crawl_times:
-        # 计算时间差
-        hour_diff = abs(current_hour - target_hour)
-        minute_diff = abs(current_minute - target_minute)
-        
-        # 如果在目标时间的10分钟内，返回True
-        if hour_diff == 0 and minute_diff <= 10:
-            return True
-        # 处理跨小时的情况（如23:55接近00:00）
-        elif hour_diff == 23 and ((current_hour == 23 and current_minute >= 50) or 
-                                 (current_hour == 0 and current_minute <= 10)):
-            return True
-    
-    return False
 
-def daemon_monitor(interval: int = 600):
-    """后台守护主循环，根据时间点决定是否爬取"""
-    setup_logging()
-    logging.info("=== v2rayN 后台监控程序已启动 ===")
-    
-    # 记录上次爬取的日期
-    last_crawl_date = datetime.now().date()
-
-    try:
-        while True:
-            now = datetime.now()
-            current_date = now.date()
-            
-            # 检查是否需要爬取的条件：
-            # 1. 当前时间是爬取时间点
-            # 2. 或者v2rayN未运行（需要重启）
-            # 3. 或者日期变更（新的一天，需要更新节点）
-            if should_crawl_now() or not is_v2rayn_running() or current_date != last_crawl_date:
-                logging.info("检测到需要更新节点...")
-                update_and_restart_if_needed()
-                last_crawl_date = current_date
-            else:
-                logging.info(f"v2rayN 正常运行中，当前时间 {now.strftime('%H:%M:%S')} 不在爬取时间点")
-            
-            # 根据当前时间调整检查间隔
-            # 非爬取时间点可以使用较长间隔，接近爬取时间点使用较短间隔
-            if should_crawl_now():
-                wait_interval = 60  # 爬取时间点附近每分钟检查一次
-            else:
-                wait_interval = interval  # 正常使用配置的间隔
-                
-            logging.info(f"等待 {wait_interval} 秒后再次检查")
-            time.sleep(wait_interval)  # 等待下一个周期
-    except KeyboardInterrupt:
-        logging.info("监控程序手动中断，退出。")
-    except Exception as e:
-        logging.error(f"后台监控发生异常: {type(e).__name__}: {e}")
 
 def generate_silent_bat_and_vbs(script_name: str = "v2ray_auto_updater.py", bat_name: str = "run_v2ray_silent.bat", vbs_name: str = "silent_runner.vbs"):
     """
@@ -1551,7 +1550,434 @@ async def monitor_system_resources_async_wrapper():
     # 实现监控逻辑
     return True
 
-# ⚡ 真正的异步黑客模式
+# === 高效扫描算法 ===
+# 基于Mirai的随机IP扫描算法改进
+
+def generate_random_ip() -> str:
+    """高效生成随机IP地址
+    
+    Returns:
+        str: 随机生成的IPv4地址
+    """
+    # 类似Mirai的随机IP生成，避免扫描私有网络（可选）
+    while True:
+        ip = socket.inet_ntoa(struct.pack('>I', random.randint(1, 0xFFFFFFFF)))
+        # 可选择排除私有IP范围
+        # if not ip.startswith(('10.', '172.16.', '192.168.')):
+        #     return ip
+        return ip
+
+def generate_ip_range(start_ip: str, end_ip: str) -> List[str]:
+    """生成IP范围列表
+    
+    Args:
+        start_ip: 起始IP地址
+        end_ip: 结束IP地址
+    
+    Returns:
+        List[str]: IP地址列表
+    """
+    def ip_to_int(ip):
+        return struct.unpack('>I', socket.inet_aton(ip))[0]
+    
+    def int_to_ip(ip_int):
+        return socket.inet_ntoa(struct.pack('>I', ip_int))
+    
+    start = ip_to_int(start_ip)
+    end = ip_to_int(end_ip)
+    
+    return [int_to_ip(ip) for ip in range(start, end + 1)]
+
+# === 并发连接管理器 ===
+class ConnectionPool:
+    """高效连接池管理，基于Mirai的连接管理设计"""
+    
+    def __init__(self, max_connections: int = 100):
+        self.max_connections = max_connections
+        self.semaphore = asyncio.Semaphore(max_connections)
+        self.session = None
+        
+    async def __aenter__(self):
+        if self.session is None:
+            self.session = aiohttp.ClientSession()
+        return self
+    
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        if self.session:
+            await self.session.close()
+            self.session = None
+    
+    async def acquire(self):
+        """获取连接资源"""
+        await self.semaphore.acquire()
+        return self.session
+    
+    def release(self):
+        """释放连接资源"""
+        self.semaphore.release()
+
+# === 异步扫描器 ===
+async def scan_port_async(ip: str, port: int, timeout: float = 1.0) -> bool:
+    """异步扫描单个端口
+    
+    Args:
+        ip: 目标IP地址
+        port: 目标端口
+        timeout: 超时时间
+    
+    Returns:
+        bool: 端口是否开放
+    """
+    try:
+        reader, writer = await asyncio.wait_for(
+            asyncio.open_connection(ip, port),
+            timeout=timeout
+        )
+        writer.close()
+        await writer.wait_closed()
+        return True
+    except Exception:
+        return False
+
+async def scan_ip_async(ip: str, ports: List[int], timeout: float = 1.0) -> Dict[str, bool]:
+    """异步扫描单个IP的多个端口
+    
+    Args:
+        ip: 目标IP地址
+        ports: 端口列表
+        timeout: 超时时间
+    
+    Returns:
+        Dict[str, bool]: 端口扫描结果
+    """
+    results = {}
+    tasks = []
+    
+    for port in ports:
+        task = asyncio.create_task(scan_port_async(ip, port, timeout))
+        tasks.append((port, task))
+    
+    for port, task in tasks:
+        results[port] = await task
+    
+    return results
+
+async def scan_network_async(
+    ip_generator, 
+    ports: List[int], 
+    max_concurrent: int = 100,
+    max_scans: int = 1000,
+    timeout: float = 1.0
+) -> Dict[str, Dict[str, bool]]:
+    """异步扫描网络（类似Mirai的高效扫描）
+    
+    Args:
+        ip_generator: IP生成器
+        ports: 端口列表
+        max_concurrent: 最大并发扫描数
+        max_scans: 最大扫描数量
+        timeout: 超时时间
+    
+    Returns:
+        Dict[str, Dict[str, bool]]: 扫描结果
+    """
+    results = {}
+    semaphore = asyncio.Semaphore(max_concurrent)
+    tasks = []
+    scanned_ips: Set[str] = set()
+    
+    async def scan_wrapper(ip: str):
+        if ip in scanned_ips:
+            return
+        scanned_ips.add(ip)
+        
+        async with semaphore:
+            try:
+                scan_result = await scan_ip_async(ip, ports, timeout)
+                # 只记录有开放端口的IP
+                if any(scan_result.values()):
+                    results[ip] = scan_result
+            except Exception as e:
+                logging.debug(f"扫描 {ip} 失败: {e}")
+    
+    # 生成扫描任务
+    for _ in range(max_scans):
+        ip = next(ip_generator)
+        task = asyncio.create_task(scan_wrapper(ip))
+        tasks.append(task)
+    
+    # 等待所有任务完成
+    await asyncio.gather(*tasks, return_exceptions=True)
+    
+    return results
+
+# === 跨架构适配层 ===
+class PlatformAdapter:
+    """跨平台适配层，支持Windows/Linux/macOS"""
+    
+    @staticmethod
+    def get_platform() -> str:
+        """获取当前平台"""
+        if sys.platform.startswith('win'):
+            return 'windows'
+        elif sys.platform.startswith('linux'):
+            return 'linux'
+        elif sys.platform.startswith('darwin'):
+            return 'macos'
+        else:
+            return 'unknown'
+    
+    @staticmethod
+    def get_config_path(base_dir: str) -> str:
+        """获取平台特定的配置路径"""
+        platform = PlatformAdapter.get_platform()
+        
+        if platform == 'windows':
+            return os.path.join(base_dir, 'config.json')
+        elif platform == 'linux':
+            return os.path.join(base_dir, '.config', 'config.json')
+        elif platform == 'macos':
+            return os.path.join(base_dir, 'Library', 'Preferences', 'config.json')
+        else:
+            return os.path.join(base_dir, 'config.json')
+    
+    @staticmethod
+    def execute_command(cmd: str) -> Optional[str]:
+        """执行平台特定的命令"""
+        platform = PlatformAdapter.get_platform()
+        
+        try:
+            if platform == 'windows':
+                result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+            else:
+                result = subprocess.run(cmd, shell=True, capture_output=True, text=True, executable='/bin/bash')
+            
+            if result.returncode == 0:
+                return result.stdout.strip()
+            return None
+        except Exception as e:
+            logging.error(f"执行命令失败: {e}")
+            return None
+
+# === 扫描结果处理和节点整合 ===
+
+def ip_port_to_proxy_node(ip: str, port: int, protocol: str = 'vmess') -> str:
+    """将IP和端口转换为代理节点字符串
+    
+    Args:
+        ip: IP地址
+        port: 端口号
+        protocol: 代理协议
+    
+    Returns:
+        str: 代理节点字符串
+    """
+    if protocol == 'vmess':
+        # 生成一个简单的vmess节点
+        vmess_config = {
+            "v": "2",
+            "ps": f"扫描节点_{ip}:{port}",
+            "add": ip,
+            "port": port,
+            "id": "00000000-0000-0000-0000-000000000000",
+            "aid": "0",
+            "scy": "auto",
+            "net": "tcp",
+            "type": "none",
+            "host": "",
+            "path": "",
+            "tls": "",
+            "sni": "",
+            "alpn": ""
+        }
+        vmess_json = json.dumps(vmess_config)
+        vmess_b64 = base64.b64encode(vmess_json.encode('utf-8')).decode('utf-8')
+        return f"vmess://{vmess_b64}"
+    elif protocol == 'trojan':
+        # 生成trojan节点
+        return f"trojan://password@{ip}:{port}#扫描节点_{ip}:{port}"
+    elif protocol == 'ss':
+        # 生成shadowsocks节点
+        ss_config = f"aes-256-gcm:password@{ip}:{port}"
+        ss_b64 = base64.b64encode(ss_config.encode('utf-8')).decode('utf-8')
+        return f"ss://{ss_b64}#扫描节点_{ip}:{port}"
+    else:
+        return f"# 不支持的协议: {protocol}"
+
+def parse_proxy_node(node: str) -> Dict[str, Any]:
+    """解析代理节点字符串
+    
+    Args:
+        node: 代理节点字符串
+    
+    Returns:
+        Dict[str, Any]: 节点信息字典
+    """
+    info = {
+        "protocol": "unknown",
+        "ip": None,
+        "port": None,
+        "remarks": ""
+    }
+    
+    try:
+        if node.startswith("vmess://"):
+            info["protocol"] = "vmess"
+            vmess_content = node[8:]
+            # 处理base64填充
+            padding = len(vmess_content) % 4
+            if padding:
+                vmess_content += '=' * (4 - padding)
+            vmess_json = json.loads(base64.b64decode(vmess_content).decode('utf-8', errors='ignore'))
+            info["ip"] = vmess_json.get("add")
+            info["port"] = vmess_json.get("port")
+            info["remarks"] = vmess_json.get("ps", "")
+        elif node.startswith("trojan://"):
+            info["protocol"] = "trojan"
+            pattern = r'trojan://[^@]+@([^:]+):(\d+)(?:#(.*))?'
+            match = re.search(pattern, node)
+            if match:
+                info["ip"] = match.group(1)
+                info["port"] = int(match.group(2))
+                info["remarks"] = match.group(3) or ""
+        elif node.startswith("ss://"):
+            info["protocol"] = "ss"
+            ss_content = node[5:]
+            if '#' in ss_content:
+                ss_content, _ = ss_content.split('#', 1)
+            padding = len(ss_content) % 4
+            if padding:
+                ss_content += '=' * (4 - padding)
+            decoded = base64.b64decode(ss_content).decode('utf-8', errors='ignore')
+            pattern = r'[^:]+:[^@]+@([^:]+):(\d+)'
+            match = re.search(pattern, decoded)
+            if match:
+                info["ip"] = match.group(1)
+                info["port"] = int(match.group(2))
+    except Exception as e:
+        logging.debug(f"解析节点失败: {e}")
+    
+    return info
+
+def merge_nodes(new_nodes: List[str], existing_nodes: List[str]) -> List[str]:
+    """合并新节点和现有节点，去除重复项
+    
+    Args:
+        new_nodes: 新发现的节点列表
+        existing_nodes: 现有节点列表
+    
+    Returns:
+        List[str]: 合并后的节点列表
+    """
+    # 创建节点标识符集合，用于去重
+    seen_identifiers = set()
+    merged_nodes = []
+    
+    # 处理现有节点
+    for node in existing_nodes:
+        info = parse_proxy_node(node)
+        if info["ip"] and info["port"]:
+            identifier = f"{info['protocol']}_{info['ip']}_{info['port']}"
+            seen_identifiers.add(identifier)
+            merged_nodes.append(node)
+    
+    # 处理新节点
+    new_count = 0
+    for node in new_nodes:
+        info = parse_proxy_node(node)
+        if info["ip"] and info["port"]:
+            identifier = f"{info['protocol']}_{info['ip']}_{info['port']}"
+            if identifier not in seen_identifiers:
+                seen_identifiers.add(identifier)
+                merged_nodes.append(node)
+                new_count += 1
+    
+    logging.info(f"[✅] 节点合并完成，新增 {new_count} 个节点，总计 {len(merged_nodes)} 个节点")
+    return merged_nodes
+
+async def process_scan_results(scan_results: Dict[str, Dict[str, bool]]) -> List[str]:
+    """处理扫描结果并生成代理节点
+    
+    Args:
+        scan_results: 扫描结果字典
+    
+    Returns:
+        List[str]: 生成的代理节点列表
+    """
+    new_nodes = []
+    
+    for ip, ports in scan_results.items():
+        for port, is_open in ports.items():
+            if is_open:
+                # 根据常见的代理端口猜测协议
+                if port in [80, 8080, 8888]:
+                    protocol = 'vmess'  # 假设是vmess
+                elif port in [443, 8443]:
+                    protocol = 'trojan'  # 假设是trojan
+                elif port in [1080, 1081]:
+                    protocol = 'ss'  # 假设是shadowsocks
+                else:
+                    protocol = 'vmess'  # 默认使用vmess
+                
+                # 生成代理节点
+                node = ip_port_to_proxy_node(ip, port, protocol)
+                new_nodes.append(node)
+    
+    logging.info(f"[🔍] 扫描结果处理完成，生成 {len(new_nodes)} 个新节点")
+    return new_nodes
+
+async def integrate_scan_results_with_existing() -> bool:
+    """将扫描结果与现有节点整合
+    
+    Returns:
+        bool: 整合是否成功
+    """
+    try:
+        # 1. 执行网络扫描
+        logging.info("[⚡] 开始网络扫描...")
+        
+        # 生成随机IP生成器
+        def ip_generator():
+            while True:
+                yield generate_random_ip()
+        
+        # 扫描常见代理端口
+        common_proxy_ports = [80, 443, 8080, 8443, 8888, 1080, 1081]
+        
+        # 执行扫描
+        scan_results = await scan_network_async(
+            ip_generator(),
+            common_proxy_ports,
+            max_concurrent=Config.MAX_CONCURRENT_REQUESTS,
+            max_scans=100,  # 限制扫描数量，避免过度消耗资源
+            timeout=0.5
+        )
+        
+        # 2. 处理扫描结果
+        new_nodes = await process_scan_results(scan_results)
+        
+        # 3. 读取现有节点
+        nodes_path = get_nodes_path()
+        existing_nodes = []
+        if os.path.exists(nodes_path):
+            with open(nodes_path, 'r', encoding='utf-8') as f:
+                existing_nodes = [line.strip() for line in f if line.strip()]
+        
+        # 4. 合并节点
+        merged_nodes = merge_nodes(new_nodes, existing_nodes)
+        
+        # 5. 保存合并后的节点
+        with open(nodes_path, 'w', encoding='utf-8') as f:
+            f.write('\n'.join(merged_nodes))
+        
+        logging.info(f"[✅] 扫描节点整合完成，节点文件已更新")
+        return True
+        
+    except Exception as e:
+        logging.error(f"[❌] 整合扫描结果失败: {e}")
+        return False
+
+# ⚡ 真正的异步黑客模式 - 整合了扫描功能
 async def elite_main_async():
     """真正的异步黑客模式 - 完整版"""
     if not has_async:
@@ -1569,6 +1995,10 @@ async def elite_main_async():
             asyncio.create_task(benchmark_existing_nodes_async_wrapper()),
             asyncio.create_task(monitor_system_resources_async_wrapper())
         ]
+        
+        # 根据配置决定是否执行扫描
+        if Config.ENABLE_SCANNING:
+            tasks.append(asyncio.create_task(integrate_scan_results_with_existing()))
         
         results = await asyncio.gather(*tasks, return_exceptions=True)
         
@@ -1610,5 +2040,4 @@ def ultimate_stealth():
     logging.info(random.choice(stealth_messages))
 
 if __name__ == "__main__":
-    daemon_monitor(interval=600)  # 每10分钟检测一次
-
+    main()  # 直接执行一次节点更新
