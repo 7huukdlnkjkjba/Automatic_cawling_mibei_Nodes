@@ -80,7 +80,16 @@ class Config:
     CHECK_TIMEOUT = 10  # 进程检查超时时间(秒)
     MAIN_URL = 'https://www.mibei77.com/'  # 目标网站主URL
     
-    # 🔥 性能优化配置
+    # � 可能的配置文件路径列表
+    CONFIG_PATHS = [
+        os.path.join(BASE_DIR, CONFIG_FILE),  # 脚本所在目录
+        os.path.join(BASE_DIR, "binConfigs", CONFIG_FILE),  # binConfigs子目录
+        os.path.join(os.path.expanduser("~"), "v2rayN", CONFIG_FILE),  # 用户目录下的v2rayN
+        os.path.join(BASE_DIR, "v2rayN", CONFIG_FILE),  # 当前目录下的v2rayN
+        os.path.join(BASE_DIR, "config", CONFIG_FILE),  # config子目录
+    ]
+    
+    # � 性能优化配置
     MAX_CONCURRENT_REQUESTS = 20  # 最大并发请求数
     CONNECTION_TIMEOUT = 10  # 连接超时时间
     RETRY_ATTEMPTS = 3  # 最大重试次数
@@ -368,7 +377,53 @@ class MemoryOptimizer:
 # 初始化内存优化器
 memory_optimizer = MemoryOptimizer()
 
-# 🔄 弹性执行，自动恢复
+# � 通用配置文件查找函数
+def find_config_file(config_name: str = "config.json", search_dirs: Optional[List[str]] = None, recursive: bool = True) -> Optional[str]:
+    """
+    在指定目录中查找配置文件，支持递归查找
+    
+    参数:
+        config_name: 配置文件名
+        search_dirs: 搜索目录列表，如果为None则使用默认目录
+        recursive: 是否递归查找子目录
+        
+    返回:
+        找到的配置文件绝对路径，未找到则返回None
+    """
+    # 默认搜索目录
+    default_dirs = [
+        Config.BASE_DIR,  # 脚本所在目录
+        os.path.join(Config.BASE_DIR, "binConfigs"),  # binConfigs子目录
+        os.path.join(os.path.expanduser("~"), "v2rayN"),  # 用户目录下的v2rayN
+        os.environ.get('PROGRAMFILES', ''),  # Program Files目录
+        os.environ.get('PROGRAMFILES(X86)', ''),  # Program Files (x86)目录
+    ]
+    
+    # 如果提供了自定义目录，使用它们；否则使用默认目录
+    dirs_to_search = search_dirs if search_dirs else default_dirs
+    
+    # 过滤掉不存在的目录
+    dirs_to_search = [d for d in dirs_to_search if d and os.path.exists(d)]
+    
+    for search_dir in dirs_to_search:
+        if recursive:
+            # 递归查找
+            for root, dirs, files in os.walk(search_dir):
+                if config_name in files:
+                    config_path = os.path.abspath(os.path.join(root, config_name))
+                    logging.debug(f"[🔍] 在 {config_path} 找到配置文件")
+                    return config_path
+        else:
+            # 非递归查找
+            config_path = os.path.abspath(os.path.join(search_dir, config_name))
+            if os.path.exists(config_path):
+                logging.debug(f"[🔍] 在 {config_path} 找到配置文件")
+                return config_path
+    
+    logging.debug(f"[❌] 未找到配置文件: {config_name}")
+    return None
+
+# �� 弹性执行，自动恢复
 def resilient_execute(func, fallback_func=None, max_attempts=3):
     """弹性执行，自动恢复"""
     for attempt in range(max_attempts):
@@ -484,20 +539,34 @@ async def download_nodes_file_async(node_url):
 
 
 def get_config_path(v2rayn_dir: Optional[str] = None) -> Optional[str]:
-    """获取v2rayn配置文件完整路径（跨平台适配）
+    """获取v2rayn配置文件完整路径（跨平台适配，增强版）
     
     参数:
-        v2rayn_dir (str): v2rayn安装目录，如果为None则使用默认目录
+        v2rayn_dir (str): v2rayn安装目录，如果为None则使用默认搜索目录
     
     返回:
-        str: config.json的完整路径
+        str: config.json的完整路径，未找到则返回None
     """
-    # 使用PlatformAdapter实现跨平台配置路径获取
+    # 如果提供了v2rayn目录，首先尝试在该目录中查找
     if v2rayn_dir:
-        return PlatformAdapter.get_config_path(v2rayn_dir)
+        # 使用增强版的PlatformAdapter.get_config_path直接查找
+        config_path = PlatformAdapter.get_config_path(v2rayn_dir, Config.CONFIG_FILE, search_subdirs=True)
+        if config_path:
+            return config_path
     
-    # 默认返回脚本目录下的配置文件
-    return os.path.join(Config.BASE_DIR, Config.CONFIG_FILE)
+    # 使用通用查找函数搜索所有可能的路径
+    config_path = find_config_file(Config.CONFIG_FILE)
+    if config_path:
+        return config_path
+    
+    # 尝试使用Config.CONFIG_PATHS中定义的路径
+    for path in Config.CONFIG_PATHS:
+        if os.path.exists(path):
+            logging.debug(f"[✅] 在预定义路径找到配置文件: {path}")
+            return path
+    
+    logging.warning(f"[❌] 未找到配置文件 {Config.CONFIG_FILE}")
+    return None
 
 
 def get_nodes_path() -> str:
@@ -667,7 +736,7 @@ def update_v2rayn_subscription(new_url: str) -> bool:
     """
     fake_logging()  # 生成迷惑性日志
     config_path = get_config_path()
-    if not os.path.exists(config_path):
+    if not config_path or not os.path.exists(config_path):
         logging.error(f"[❌] 找不到 config.json：{config_path}")
         return False
 
@@ -704,11 +773,95 @@ def update_v2rayn_subscription(new_url: str) -> bool:
         raise  # 抛出异常，让智能重试装饰器处理
 
 
-def add_nodes_to_mibei_group() -> bool:
+def set_best_node_as_default(best_node: str, group_name: str = "米贝") -> bool:
+    """
+    将最优节点设置为v2rayN的默认节点
+    
+    参数:
+        best_node: 最优节点的字符串表示
+        group_name: 节点所属分组名
+        
+    返回:
+        bool: 设置成功返回True，否则返回False
+    """
+    fake_logging()  # 生成迷惑性日志
+    
+    # 获取v2rayN安装目录
+    v2rayn_dir = find_v2rayn_installation()
+    if not v2rayn_dir:
+        logging.info("[ℹ️] 找不到v2rayN安装目录，跳过设置默认节点步骤")
+        return True
+    
+    # 获取配置文件路径
+    config_path = get_config_path(v2rayn_dir)
+    if not config_path or not os.path.exists(config_path):
+        logging.info("[ℹ️] 找不到config.json文件，跳过设置默认节点步骤")
+        return True
+    
+    try:
+        # 读取配置文件
+        with open(config_path, "r", encoding="utf-8") as f:
+            config_data = json.load(f)
+        
+        # 确保servers字段存在
+        if "servers" not in config_data:
+            config_data["servers"] = []
+        
+        # 解析最优节点，获取其address和port
+        best_node_address = None
+        best_node_port = None
+        
+        if best_node and best_node.startswith("vmess://"):
+            try:
+                vmess_content = best_node[8:]
+                padding = len(vmess_content) % 4
+                if padding:
+                    vmess_content += '=' * (4 - padding)
+                vmess_json = json.loads(base64.b64decode(vmess_content).decode('utf-8'))
+                best_node_address = vmess_json.get("add", "")
+                best_node_port = int(vmess_json.get("port", 443))
+            except Exception as e:
+                logging.error(f"[❌] 解析最优节点失败: {str(e)}")
+                return False
+        
+        # 查找最优节点在servers列表中的索引
+        best_node_index = -1
+        for i, server in enumerate(config_data["servers"]):
+            if server.get("group") == group_name and server.get("address") == best_node_address and server.get("port") == best_node_port:
+                best_node_index = i
+                break
+        
+        # 如果找到最优节点，设置为默认节点
+        if best_node_index != -1:
+            # v2rayN使用"index"字段来标识当前选中的节点
+            config_data["index"] = best_node_index
+            logging.info(f"[🏆] 已将最优节点设置为默认节点（索引: {best_node_index}）")
+            
+            # 保存更新后的配置文件
+            with open(config_path, "w", encoding="utf-8") as f:
+                json.dump(config_data, f, indent=4, ensure_ascii=False)
+            
+            return True
+        else:
+            logging.warning("[⚠️] 在配置文件中未找到最优节点，无法设置为默认节点")
+            return False
+            
+    except json.JSONDecodeError as e:
+        logging.error(f"[❌] 解析配置文件失败: {str(e)}")
+        return False
+    except Exception as e:
+        logging.error(f"[❌] 设置默认节点失败: {str(e)}")
+        return False
+
+
+def add_nodes_to_mibei_group(best_node: str = None) -> bool:
     """
     在v2rayN中创建名为"米贝"的分组，并将节点粘贴到该分组中。
     如果分组已存在，则覆盖原有节点。
     黑客模式：智能节点筛选、随机化、隐蔽性增强
+    
+    参数:
+        best_node: 最优节点的字符串表示（可选）
     """
     fake_logging()  # 生成迷惑性日志
     # 获取配置文件路径
@@ -849,6 +1002,15 @@ def add_nodes_to_mibei_group() -> bool:
             json.dump(config_data, f, indent=4, ensure_ascii=False)
         
         logging.info(f"[✅] 成功将{new_server_count}个节点添加到 {group_name} 分组")
+        
+        # 如果提供了最优节点，将其设置为默认节点
+        if best_node:
+            logging.info("[🏆] 正在设置最优节点为默认节点...")
+            if set_best_node_as_default(best_node, group_name):
+                logging.info("[✅] 已成功将最优节点设置为默认节点")
+            else:
+                logging.warning("[⚠️] 设置最优节点为默认节点失败")
+        
         return True
         
     except json.JSONDecodeError as e:
@@ -903,10 +1065,10 @@ async def test_latency_async(host: str, port: int = 443, timeout: float = 1.0) -
 
 # 智能节点测速函数
 async def benchmark_nodes_async(nodes):
-    """并发测速所有节点，只保留最快的节点"""
+    """并发测速所有节点，返回排序后的节点列表和最优节点"""
     if not has_async:
         # 如果异步不可用，回退到简单筛选
-        return nodes[:min(len(nodes), Config.MAX_NODES)]
+        return nodes[:min(len(nodes), Config.MAX_NODES)], None
         
     # 使用异步生成器处理节点
     async def process_node(node):
@@ -950,13 +1112,19 @@ async def benchmark_nodes_async(nodes):
     top_count = min(len(results), Config.MAX_NODES)
     top_nodes = [node for _, node in results[:top_count]]
     
+    # 确定最优节点
+    best_node = None
+    if results:
+        best_latency, best_node = results[0]
+        logging.info(f"[🏆] 找到最优节点，延迟: {best_latency:.2f}ms")
+    
     # 清理内存
-    del task_results, results
+    del task_results
     import gc
     gc.collect()
     
     logging.info(f"[🎯] 已从{len(nodes)}个节点中筛选出{len(top_nodes)}个低延迟节点")
-    return top_nodes
+    return top_nodes, best_node
 
 
 # === 节点获取功能 ===
@@ -1105,14 +1273,14 @@ def extract_node_url(node_page_url: str) -> Optional[str]:
 
 
 @smart_retry(max_retries=3)
-def download_nodes_file(node_url: str) -> bool:
+def download_nodes_file(node_url: str) -> (bool, str):
     """下载节点文件并保存到本地（黑客模式）
-
+    
     参数:
         node_url (str): 节点文件URL
-
+    
     返回:
-        bool: True表示下载成功，False表示失败
+        (bool, str): 下载是否成功，以及最优节点（如果有）
     """
     fake_logging()  # 生成迷惑性日志
     memory_optimizer.auto_cleanup()  # 自动清理内存
@@ -1214,7 +1382,10 @@ def download_nodes_file(node_url: str) -> bool:
                 logging.info("[🧠] 正在进行智能节点测速...")
                 # 运行异步测速任务
                 import asyncio
-                unique_lines = asyncio.run(benchmark_nodes_async(unique_lines))
+                unique_lines, best_node = asyncio.run(benchmark_nodes_async(unique_lines))
+                # 保存最优节点信息
+                if best_node:
+                    logging.info("[🏆] 已确定最优节点，将在添加节点时设置为默认节点")
             else:
                 # 简单随机筛选
                 unique_lines = random.sample(unique_lines, Config.MAX_NODES)
@@ -1237,13 +1408,13 @@ def download_nodes_file(node_url: str) -> bool:
 
         logging.info(f"[✅] 节点文件已保存到: {nodes_path}，共{len(unique_lines)}个节点")
         
-        return True
+        return True, best_node if 'best_node' in locals() else None
     except requests.RequestException as e:
         logging.error(f"[❌] 下载节点文件失败: {e}")
         raise  # 抛出异常让智能重试装饰器处理
     except Exception as e:
         logging.error(f"[❌] 保存节点文件失败: {e}")
-        raise
+        return False, None
 
 # 高效连接池管理类
 # ConnectionPool类已在文件上方定义
@@ -1304,7 +1475,10 @@ async def download_nodes_file_async(node_url: str) -> bool:
         
         # 并发测速选择最佳节点
         if Config.ENABLE_NODE_FILTERING and has_async:
-            unique_lines = await benchmark_nodes_async(unique_lines)
+            unique_lines, best_node = await benchmark_nodes_async(unique_lines)
+            # 保存最优节点信息
+            if best_node:
+                logging.info("[🏆] 已确定最优节点，将在添加节点时设置为默认节点")
         
         # 异步写入文件
         if has_async:
@@ -1376,11 +1550,12 @@ def main():
         sys.exit(1)  # 未找到则退出
 
     # 下载节点文件
-    if not download_nodes_file(node_url):
+    success, best_node = download_nodes_file(node_url)
+    if not success:
         sys.exit(1)  # 下载失败则退出
 
     # 添加节点到米贝分组
-    if not add_nodes_to_mibei_group():
+    if not add_nodes_to_mibei_group(best_node):
         logging.warning("添加节点到米贝分组失败，但继续执行后续步骤")
 
     # 更新订阅并重启v2rayN（失败时继续运行）
@@ -1406,11 +1581,12 @@ def update_and_restart_if_needed():
         return
 
     # 下载节点文件
-    if not download_nodes_file(node_url):
+    success, best_node = download_nodes_file(node_url)
+    if not success:
         return
 
     # 添加节点到米贝分组
-    if not add_nodes_to_mibei_group():
+    if not add_nodes_to_mibei_group(best_node):
         logging.warning("添加节点到米贝分组失败，但继续执行后续步骤")
 
     # 更新订阅并重启
@@ -1506,7 +1682,11 @@ async def benchmark_existing_nodes_async():
         nodes = content.strip().split('\n')
         if nodes:
             # 异步测速
-            await benchmark_nodes_async(nodes)
+            _, best_node = await benchmark_nodes_async(nodes)
+            # 如果找到最优节点，将其设置为默认节点
+            if best_node:
+                logging.info("[🏆] 已找到最优节点，正在设置为默认节点...")
+                set_best_node_as_default(best_node)
             return True
         return False
     except Exception as e:
@@ -1734,18 +1914,52 @@ class PlatformAdapter:
             return 'unknown'
     
     @staticmethod
-    def get_config_path(base_dir: str) -> str:
-        """获取平台特定的配置路径"""
+    def get_config_path(base_dir: str, config_name: str = "config.json", search_subdirs: bool = True) -> Optional[str]:
+        """获取平台特定的配置路径（增强版）
+        
+        参数:
+            base_dir: 基础目录
+            config_name: 配置文件名
+            search_subdirs: 是否搜索子目录
+            
+        返回:
+            找到的配置文件路径，未找到则返回None
+        """
         platform = PlatformAdapter.get_platform()
         
-        if platform == 'windows':
-            return os.path.join(base_dir, 'config.json')
-        elif platform == 'linux':
-            return os.path.join(base_dir, '.config', 'config.json')
-        elif platform == 'macos':
-            return os.path.join(base_dir, 'Library', 'Preferences', 'config.json')
-        else:
-            return os.path.join(base_dir, 'config.json')
+        # 平台特定的默认配置路径
+        platform_paths = {
+            'windows': [
+                os.path.join(base_dir, config_name),
+                os.path.join(base_dir, 'binConfigs', config_name),
+                os.path.join(os.path.expanduser("~"), "v2rayN", config_name),
+            ],
+            'linux': [
+                os.path.join(base_dir, config_name),
+                os.path.join(base_dir, '.config', config_name),
+                os.path.join(os.path.expanduser("~"), '.config', 'v2rayn', config_name),
+            ],
+            'macos': [
+                os.path.join(base_dir, config_name),
+                os.path.join(base_dir, 'Library', 'Preferences', config_name),
+                os.path.join(os.path.expanduser("~"), 'Library', 'Preferences', 'v2rayn', config_name),
+            ]
+        }
+        
+        # 获取当前平台的默认路径列表
+        default_paths = platform_paths.get(platform, [os.path.join(base_dir, config_name)])
+        
+        # 检查默认路径
+        for path in default_paths:
+            if os.path.exists(path):
+                logging.debug(f"[✅] 在平台特定路径找到配置文件: {path}")
+                return path
+        
+        # 如果允许搜索子目录且在默认路径未找到，使用find_config_file函数进行更广泛的搜索
+        if search_subdirs:
+            return find_config_file(config_name, [base_dir], recursive=True)
+        
+        return None
     
     @staticmethod
     def execute_command(cmd: str) -> Optional[str]:
