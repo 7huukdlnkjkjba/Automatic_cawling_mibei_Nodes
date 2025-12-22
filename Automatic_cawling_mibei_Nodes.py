@@ -124,6 +124,13 @@ class Config:
     MIN_SUCCESS_RATE = 0.7
     SCORE_THRESHOLD = 60
     
+    # 👑 历史节点王配置 (新增)
+    HISTORY_KING_ENABLED = True
+    HISTORY_KING_MIN_SCORE = 70  # 历史节点王最低得分
+    MAX_KING_INACTIVE_DAYS = 14  # 历史节点王最大未活跃天数
+    ENABLE_KING_REVIVAL = True   # 是否允许重新激活历史节点王
+    KING_REVIVAL_SCORE_BOOST = 1.2  # 历史节点王重新激活时的得分加成
+    
     # ⚡ 测速优化配置 (新增)
     TEST_TIMEOUT_MIN = 1.0
     TEST_TIMEOUT_MAX = 2.5
@@ -332,14 +339,18 @@ class NodeKingSystem:
     def _eliminate(self, node_id: str, data: dict, reason: str):
         """淘汰节点"""
         if data.get('status') == 'king':
+            # 保存到历史节点王记录
             self.kings[node_id] = {
                 'node': data['node'],
                 'king_days': data['king_days'],
                 'best_latency': data['best_latency'],
                 'avg_latency': data['avg_latency'],
+                'worst_latency': data['worst_latency'],
                 'success_rate': data['success_rate'],
+                'score': data['score'],
                 'end_time': datetime.now().isoformat(),
-                'reason': reason
+                'reason': reason,
+                'last_active': data['last_active']
             }
         
         self.dead[node_id] = {
@@ -423,7 +434,10 @@ class NodeKingSystem:
             'avg_latency': data['avg_latency'],
             'success_rate': data['success_rate'],
             'age_days': data['age_days'],
-            'start_time': datetime.now().isoformat()
+            'start_time': datetime.now().isoformat(),
+            'best_latency': data['best_latency'],
+            'worst_latency': data['worst_latency'],
+            'last_active': datetime.now().isoformat()
         }
         
         logging.info(f"[节点王] {node_id[:8]} 得分:{winner['score']:.1f} 延迟:{data['avg_latency']:.1f}ms")
@@ -506,6 +520,155 @@ class NodeKingSystem:
             'avg_success': avg_success,
             'oldest_node': max([n['age_days'] for n in self.nodes.values()], default=0)
         }
+    
+    def _is_king_still_valid(self, king_id: str, king_data: dict) -> bool:
+        """检查历史节点王是否仍然有效 - 新增方法"""
+        if not Config.HISTORY_KING_ENABLED:
+            return False
+        
+        try:
+            # 1. 检查节点字符串是否有效
+            node_str = king_data.get('node', '')
+            if not node_str:
+                return False
+            
+            # 2. 检查是否已被淘汰
+            if king_id in self.dead:
+                return False
+            
+            # 3. 检查得分阈值
+            score = king_data.get('score', 0)
+            if score < Config.HISTORY_KING_MIN_SCORE:
+                return False
+            
+            # 4. 检查最近是否活跃（避免过时的节点王）
+            last_active = king_data.get('last_active')
+            if last_active:
+                try:
+                    last_time = datetime.fromisoformat(last_active)
+                    inactive_days = (datetime.now() - last_time).days
+                    if inactive_days > Config.MAX_KING_INACTIVE_DAYS:
+                        return False
+                except:
+                    return False
+            else:
+                return False
+            
+            # 5. 检查延迟是否仍然优秀
+            latency = king_data.get('avg_latency', float('inf'))
+            if latency > Config.MAX_TEST_LATENCY * 0.7:  # 历史节点王要求更严格
+                return False
+            
+            return True
+        except Exception as e:
+            logging.debug(f"[历史节点王检查] {king_id[:8]} 检查失败: {e}")
+            return False
+    
+    def get_best_king_overall(self) -> Optional[dict]:
+        """获取所有节点王中性能最好的（包括历史和当前）- 新增方法"""
+        if not Config.HISTORY_KING_ENABLED:
+            return self.get_king()
+        
+        best_king = None
+        best_score = -1
+        
+        # 1. 检查当前节点王
+        current_king = self.get_king()
+        if current_king:
+            best_king = current_king
+            best_score = current_king['score']
+            logging.debug(f"[历史节点王对比] 当前节点王: {current_king['node_id'][:8]} 得分:{current_king['score']:.1f}")
+        
+        # 2. 检查历史节点王
+        for king_id, king_data in self.kings.items():
+            # 检查历史节点王是否仍然有效
+            if not self._is_king_still_valid(king_id, king_data):
+                continue
+            
+            score = king_data.get('score', 0)
+            latency = king_data.get('avg_latency', float('inf'))
+            
+            # 对历史节点王给予额外加分（因为它们曾经是王者）
+            if Config.ENABLE_KING_REVIVAL:
+                score = score * Config.KING_REVIVAL_SCORE_BOOST
+            
+            # 综合评分：得分 + (100 - 延迟/10)
+            latency_bonus = max(0, 100 - (latency / 10))
+            composite_score = score + latency_bonus * 0.3
+            
+            logging.debug(f"[历史节点王对比] 历史节点王: {king_id[:8]} 原始得分:{king_data.get('score', 0):.1f} "
+                         f"加成后:{score:.1f} 延迟:{latency:.1f}ms 综合得分:{composite_score:.1f}")
+            
+            if composite_score > best_score:
+                best_score = composite_score
+                best_king = {
+                    'node': king_data['node'],
+                    'node_id': king_id,
+                    'score': king_data.get('score', 0),
+                    'latency': latency,
+                    'is_history': True,
+                    'king_data': king_data,
+                    'composite_score': composite_score
+                }
+        
+        # 3. 如果历史节点王更好，且允许重新激活
+        if best_king and best_king.get('is_history') and Config.ENABLE_KING_REVIVAL:
+            logging.info(f"[🏆] 历史节点王 {best_king['node_id'][:8]} 比当前节点王更优秀 "
+                        f"(得分:{best_king['composite_score']:.1f} vs {current_king['score'] if current_king else 0:.1f})")
+            
+            # 重新激活历史节点王
+            self._revive_history_king(best_king['node_id'], best_king['king_data'])
+            
+            # 更新返回信息
+            best_king['is_revived'] = True
+        
+        return best_king
+    
+    def _revive_history_king(self, king_id: str, king_data: dict):
+        """重新激活历史节点王 - 新增方法"""
+        try:
+            node_str = king_data.get('node', '')
+            if not node_str:
+                return
+            
+            # 1. 如果历史节点王在淘汰记录中，移除它
+            if king_id in self.dead:
+                logging.info(f"[🔄] 从淘汰记录中恢复历史节点王: {king_id[:8]}")
+                del self.dead[king_id]
+            
+            # 2. 添加到活跃节点中
+            self.nodes[king_id] = {
+                **self._create_data(node_str),
+                'status': 'king',
+                'score': king_data.get('score', 0),
+                'avg_latency': king_data.get('avg_latency', float('inf')),
+                'best_latency': king_data.get('best_latency', king_data.get('avg_latency', float('inf'))),
+                'worst_latency': king_data.get('worst_latency', king_data.get('avg_latency', float('inf'))),
+                'success_rate': king_data.get('success_rate', 0),
+                'total_latency': king_data.get('avg_latency', 100) * 10,  # 估算总延迟
+                'latency_count': 10,
+                'king_days': 1,  # 重新开始计算在位天数
+                'age_days': 0,   # 重新计算节点年龄
+                'create_time': datetime.now().isoformat(),
+                'last_active': datetime.now().isoformat(),
+                'tests': 10,     # 给予一定的测试次数
+                'success': int(king_data.get('success_rate', 0.8) * 10),
+                'fails': int((1 - king_data.get('success_rate', 0.8)) * 10)
+            }
+            
+            # 3. 更新历史记录
+            self.kings[king_id]['revived'] = True
+            self.kings[king_id]['revive_time'] = datetime.now().isoformat()
+            self.kings[king_id]['revive_count'] = self.kings[king_id].get('revive_count', 0) + 1
+            
+            logging.info(f"[🔄] 历史节点王 {king_id[:8]} 已重新激活，延迟:{king_data.get('avg_latency', 'N/A')}ms "
+                        f"成功率:{king_data.get('success_rate', 0):.1%}")
+            
+            # 4. 保存更改
+            self.save()
+            
+        except Exception as e:
+            logging.error(f"[❌] 重新激活历史节点王失败: {e}")
 
 
 # === 工具函数 ===
@@ -1220,7 +1383,7 @@ async def benchmark_nodes_async(nodes):
     return top_nodes, best_node
 
 async def enhanced_benchmark_nodes_async(nodes: List[str], king_system: NodeKingSystem = None) -> tuple:
-    """增强版节点测速 - 集成节点王机制"""
+    """增强版节点测速 - 集成节点王机制（使用最佳节点王）"""
     if not nodes:
         return [], None
     
@@ -1282,13 +1445,30 @@ async def enhanced_benchmark_nodes_async(nodes: List[str], king_system: NodeKing
     
     king_node = None
     if use_king_system:
-        king_info = king_system.select_king()
-        if king_info and king_info['node'] in alive:
-            king_node = king_info['node']
+        # 🆕 使用最佳节点王（包括历史和当前）
+        best_king = king_system.get_best_king_overall()
+        
+        if best_king:
+            king_node = best_king['node']
+            if best_king.get('is_revived'):
+                logging.info(f"[👑] 已重新激活历史节点王: {best_king['node_id'][:8]} "
+                            f"延迟:{best_king['latency']:.1f}ms 得分:{best_king['score']:.1f}")
+            else:
+                logging.info(f"[👑] 使用最佳节点王: {best_king['node_id'][:8]} "
+                            f"延迟:{best_king['latency']:.1f}ms 得分:{best_king['score']:.1f}")
+        else:
+            # 回退到选择新的节点王
+            king_info = king_system.select_king()
+            if king_info:
+                king_node = king_info['node']
+        
+        # 确保节点王在最前面
+        if king_node and king_node in alive:
             if king_node in alive:
                 alive.remove(king_node)
-                alive.insert(0, king_node)
+            alive.insert(0, king_node)
         
+        # 日常检查和保存
         if random.random() < 0.3:
             king_system.daily_check()
         
@@ -1313,10 +1493,49 @@ def find_node_page_url(main_url: str) -> Optional[str]:
         soup = BeautifulSoup(response.text, 'html.parser')
         today = get_today_date_str()
         
-        for a_tag in soup.find_all('a', href=True):
+        # 添加调试信息，打印前10个链接文本
+        logging.info(f"今天的日期格式: {today}")
+        logging.info("主页面上的部分链接文本:")
+        all_a_tags = soup.find_all('a', href=True)
+        for i, a_tag in enumerate(all_a_tags[:10]):
             link_text = a_tag.get_text(strip=True)
-            if link_text.startswith(today) and "免费精选节点" in link_text:
-                return a_tag['href']
+            logging.info(f"链接{i+1}: {link_text}")
+            # 检查是否包含"免费"或"节点"等关键词
+            if "免费" in link_text or "节点" in link_text:
+                logging.info(f"找到包含关键词的链接: {link_text} -> {a_tag['href']}")
+        
+        # 尝试查找所有包含"节点"的链接
+        # 优先查找包含具体日期和节点的链接
+        specific_node_links = []
+        general_node_links = []
+        
+        for a_tag in all_a_tags:
+            link_text = a_tag.get_text(strip=True)
+            href = a_tag['href']
+            
+            # 跳过导航链接
+            if link_text == "每日免费节点" or link_text == "网站首页" or link_text == "科学上网客户端下载":
+                continue
+                
+            # 分类链接
+            if (today in link_text and "节点" in link_text) or ("今日" in link_text and "节点" in link_text):
+                specific_node_links.append((link_text, href))
+            elif "免费" in link_text and "节点" in link_text:
+                general_node_links.append((link_text, href))
+            elif "v2ray" in link_text.lower() and "clash" in link_text.lower():
+                general_node_links.append((link_text, href))
+        
+        # 优先返回今日节点链接
+        if specific_node_links:
+            link_text, href = specific_node_links[0]
+            logging.info(f"找到今日节点链接: {link_text} -> {href}")
+            return href
+        
+        # 如果没有今日节点，返回最新的免费节点链接
+        if general_node_links:
+            link_text, href = general_node_links[0]
+            logging.info(f"找到最新免费节点链接: {link_text} -> {href}")
+            return href
         
         logging.warning("未找到今日免费精选节点链接")
     except requests.RequestException as e:
@@ -1418,7 +1637,7 @@ def download_nodes_file(node_url: str) -> (bool, List[str]):
         
         time.sleep(random.uniform(0.5, 1.5))
         
-        response = requests.get(node_url, headers=headers, timeout=5)
+        response = requests.get(node_url, headers=headers, timeout=15)
         response.raise_for_status()
         
         content_length = len(response.text)
@@ -1614,6 +1833,9 @@ def main():
     if Config.NODE_KING_ENABLED:
         king_system = NodeKingSystem()
         logging.info("[系统] 节点王残酷淘汰已启用")
+        
+        if Config.HISTORY_KING_ENABLED:
+            logging.info("[系统] 历史节点王机制已启用")
     
     v2rayn_available = validate_v2rayn_installation()
     if not v2rayn_available:
@@ -1661,10 +1883,13 @@ def main():
     logging.info(f"[保存] {len(alive_nodes)}个节点已保存")
     
     if king_system:
-        current_king = king_system.get_king()
-        if current_king:
-            logging.info(f"[节点王] {current_king['node_id'][:8]} 在位{current_king['king_days']}天")
-            logging.info(f"       得分:{current_king['score']:.1f} 延迟:{current_king['latency']:.1f}ms")
+        # 🆕 显示当前最佳节点王信息
+        best_king = king_system.get_best_king_overall()
+        if best_king:
+            king_type = "历史节点王" if best_king.get('is_history') else "当前节点王"
+            king_status = "(重新激活)" if best_king.get('is_revived') else ""
+            logging.info(f"[👑] 最佳节点王: {best_king['node_id'][:8]} {king_type}{king_status}")
+            logging.info(f"      得分:{best_king['score']:.1f} 延迟:{best_king['latency']:.1f}ms")
     
     if not add_nodes_to_mibei_group(king_node):
         logging.warning("[警告] 添加节点到分组失败")
@@ -1687,6 +1912,7 @@ def main():
         logging.info(f"活跃节点: {stats['active_nodes']}个")
         logging.info(f"节点王: {stats['kings']}个")
         logging.info(f"淘汰节点: {stats['dead_nodes']}个")
+        logging.info(f"历史节点王: {len(king_system.kings)}个")
         logging.info(f"平均延迟: {stats['avg_latency']:.1f}ms")
         logging.info(f"平均成功率: {stats['avg_success']:.1%}")
         logging.info(f"{'='*50}")
