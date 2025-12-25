@@ -893,47 +893,7 @@ def get_v2rayn_path() -> str:
     else:
         return os.path.join(Config.BASE_DIR, 'v2rayn')
 
-async def download_nodes_file_async(node_url):
-    """异步下载节点文件"""
-    fake_logging()
-    logging.info(f"[🔒] 正在异步下载节点文件: {node_url}")
-    
-    if has_async:
-        async with aiohttp.ClientSession() as session:
-            content = await fetch_page_async(session, node_url)
-            if content:
-                lines = content.strip().split('\n')
-                unique_lines = []
-                seen_node_identifiers = set()
-                
-                for line in lines:
-                    if not line.strip():
-                        continue
-                        
-                    node_identifier = None
-                    if line.startswith("vmess://"):
-                        try:
-                            vmess_content = line[8:]
-                            padding = len(vmess_content) % 4
-                            if padding:
-                                vmess_content += '=' * (4 - padding)
-                            vmess_json = json.loads(base64.b64decode(vmess_content).decode('utf-8', errors='ignore'))
-                            address = vmess_json.get("add", "")
-                            port = str(vmess_json.get("port", ""))
-                            if address and port:
-                                node_identifier = f"{address}:{port}"
-                        except Exception:
-                            pass
-                    
-                    if node_identifier and node_identifier not in seen_node_identifiers:
-                        seen_node_identifiers.add(node_identifier)
-                        unique_lines.append(line)
-                    elif not node_identifier and line not in unique_lines:
-                        unique_lines.append(line)
-                
-                unique_content = '\n'.join(unique_lines)
-                return unique_content
-    return None
+# 这个函数已经被更新，旧版本已删除
 
 def get_config_path(v2rayn_dir: Optional[str] = None) -> Optional[str]:
     """获取v2rayn配置文件完整路径"""
@@ -1312,6 +1272,133 @@ def test_latency(host: str, port: int = 443, timeout: float = 1.0) -> float:
         logging.debug(f"[❌] 延迟测试失败: {host}:{port} - {str(e)}")
         return float("inf")
 
+def parse_vmess(vmess_url: str) -> dict:
+    """解析vmess节点字符串，返回包含节点信息的字典"""
+    try:
+        content = vmess_url[8:] if vmess_url.startswith("vmess://") else vmess_url
+        # 处理base64填充问题
+        padding = len(content) % 4
+        if padding:
+            content += '=' * (4 - padding)
+        # 解码并解析JSON
+        vmess_json = json.loads(base64.b64decode(content).decode('utf-8', errors='ignore'))
+        return vmess_json
+    except Exception:
+        return {}
+
+async def check_google_html_async(proxy_url: str, timeout: float = 3.0) -> bool:
+    """检查代理是否能访问Google并返回HTML内容"""
+    GOOGLE_URL = "https://www.google.com"
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "text/html"
+    }
+
+    try:
+        timeout_cfg = aiohttp.ClientTimeout(total=timeout)
+        async with aiohttp.ClientSession(timeout=timeout_cfg) as session:
+            async with session.get(
+                GOOGLE_URL,
+                proxy=proxy_url,
+                headers=headers,
+                ssl=False
+            ) as resp:
+
+                if resp.status != 200:
+                    return False
+
+                text = await resp.text()
+                return "<html" in text.lower()
+
+    except Exception:
+        return False
+
+async def node_king_score_async(
+    proxy_url: str,
+    host: str,
+    port: int
+) -> dict:
+    """
+    节点王评分函数
+    返回：
+    {
+        proxy,
+        latency,
+        google_ok,
+        score
+    }
+    """
+
+    # ① Google 硬性指标
+    google_ok = await check_google_html_async(proxy_url)
+
+    if not google_ok:
+        return {
+            "proxy": proxy_url,
+            "latency": float("inf"),
+            "google_ok": False,
+            "score": 0
+        }
+
+    # ② 延迟测试（复用已有逻辑）
+    latency = await test_latency_async(host, port)
+
+    if latency == float("inf"):
+        return {
+            "proxy": proxy_url,
+            "latency": latency,
+            "google_ok": True,
+            "score": 100  # 勉强保留
+        }
+
+    # ③ 最终评分（可自行调整）
+    score = max(1, int(1000 - latency))
+
+    return {
+        "proxy": proxy_url,
+        "latency": latency,
+        "google_ok": True,
+        "score": score
+    }
+
+async def node_king_benchmark_async(nodes: list) -> list:
+    """
+    并发跑“节点王”的调度器
+    nodes 示例：
+    [
+        {
+            "proxy": "socks5://127.0.0.1:10808",
+            "host": "example.com",
+            "port": 443,
+            "original_node": "vmess://..."
+        }
+    ]
+    """
+
+    semaphore = asyncio.Semaphore(Config.MAX_CONCURRENT_REQUESTS)
+
+    async def runner(node):
+        async with semaphore:
+            result = await node_king_score_async(
+                node["proxy"],
+                node["host"],
+                node["port"]
+            )
+            # 添加原始节点信息
+            result["original_node"] = node["original_node"]
+            return result
+
+    tasks = [runner(n) for n in nodes]
+    results = await asyncio.gather(*tasks)
+
+    # ① 先淘汰 Google 不通的
+    results = [r for r in results if r["google_ok"]]
+
+    # ② 按 score 排序
+    results.sort(key=lambda x: x["score"], reverse=True)
+
+    return results
+
 async def test_latency_async(host: str, port: int = 443, timeout: float = 1.0) -> float:
     """异步TCP ping测试，返回毫秒延迟"""
     if not has_async:
@@ -1643,7 +1730,32 @@ def download_nodes_file(node_url: str) -> (bool, List[str]):
         content_length = len(response.text)
         logging.info(f"[📥] 成功下载节点文件，大小: {content_length / 1024:.2f}KB")
         
-        lines = response.text.strip().split('\n')
+        # 尝试解码base64内容
+        downloaded_content = response.text.strip()
+        lines = []
+        
+        # 检查是否是base64编码的内容（vless://、vmess://等协议通常不会以base64开头）
+        try:
+            if not (downloaded_content.startswith("vless://") or downloaded_content.startswith("vmess://") or 
+                    downloaded_content.startswith("trojan://") or downloaded_content.startswith("ss://")):
+                # 尝试base64解码
+                decoded_bytes = base64.b64decode(downloaded_content)
+                decoded_content = decoded_bytes.decode('utf-8')
+                logging.info(f"[✅] 成功解码base64内容，解码后大小: {len(decoded_content) / 1024:.2f}KB")
+                
+                # 解码后再分割行
+                lines = decoded_content.strip().split('\n')
+            else:
+                # 如果已经是直接的节点链接格式，直接分割
+                lines = downloaded_content.split('\n')
+        except Exception as e:
+            logging.warning(f"[⚠️] base64解码失败: {e}，尝试直接处理")
+            lines = downloaded_content.split('\n')
+        
+        # 过滤空行
+        lines = [line.strip() for line in lines if line.strip()]
+        
+        logging.info(f"[📋] 共解析到 {len(lines)} 个节点")
         
         unique_lines = []
         seen_node_identifiers = set()
@@ -1750,7 +1862,8 @@ def get_connection_pool() -> ConnectionPool:
 async def download_nodes_file_async(node_url: str) -> bool:
     """异步下载节点文件并保存到本地"""
     if not has_async:
-        return download_nodes_file(node_url)
+        success, _ = download_nodes_file(node_url)
+        return success
     
     fake_logging()
     try:
@@ -1758,16 +1871,20 @@ async def download_nodes_file_async(node_url: str) -> bool:
         
         headers = get_random_headers(stealth=True)
         
+        # 使用连接池获取会话
         pool = get_connection_pool()
         session = await pool.acquire()
         try:
-            async with session.get(node_url, headers=headers, timeout=5) as response:
+            async with session.get(node_url, headers=headers, timeout=10) as response:
                 response.raise_for_status()
                 content = await response.text()
+                content_length = len(content)
+                logging.info(f"[📥] 成功下载节点文件，大小: {content_length / 1024:.2f}KB")
         finally:
             pool.release()
         
         lines = content.strip().split('\n')
+        logging.info(f"[📝] 共解析到 {len(lines)} 行内容")
         
         unique_lines = []
         seen_node_identifiers = set()
@@ -1778,26 +1895,61 @@ async def download_nodes_file_async(node_url: str) -> bool:
             if not line:
                 continue
             
+            # 检查是否为有效的节点协议
             if not any(line.startswith(protocol) for protocol in valid_protocols):
                 continue
             
+            # 去重处理
             if line not in unique_lines:
                 unique_lines.append(line)
         
+        logging.info(f"[🔍] 去重后剩余 {len(unique_lines)} 个有效节点")
+        
+        # 如果没有有效节点，直接返回
+        if not unique_lines:
+            logging.warning("[⚠️] 没有找到有效的节点")
+            return False
+        
+        # 使用节点王评分系统进行筛选
         if Config.ENABLE_NODE_FILTERING and has_async:
-            unique_lines, best_node = await benchmark_nodes_async(unique_lines)
-            if best_node:
-                logging.info("[🏆] 已确定最优节点，将在添加节点时设置为默认节点")
+            logging.info("[🧠] 正在使用节点王评分系统筛选节点...")
+            
+            # 准备需要测试的节点
+            nodes_to_test = []
+            for node in unique_lines:
+                if node.startswith("vmess://"):
+                    vmess = parse_vmess(node)
+                    if vmess and "add" in vmess and "port" in vmess:
+                        nodes_to_test.append({
+                            "proxy": "socks5://127.0.0.1:10808",
+                            "host": vmess["add"],
+                            "port": int(vmess["port"]),
+                            "original_node": node
+                        })
+            
+            # 如果有可测试的节点，进行评分
+            if nodes_to_test:
+                logging.info(f"[🧪] 正在测试 {len(nodes_to_test)} 个vmess节点...")
+                results = await node_king_benchmark_async(nodes_to_test)
+                
+                if results:
+                    logging.info(f"[✅] 测试完成，{len(results)} 个节点通过验证")
+                    # 按评分排序并取前MAX_NODES个
+                    unique_lines = [result["original_node"] for result in results[:Config.MAX_NODES]]
+                    logging.info(f"[🏆] 最优节点: 评分 {results[0]['score']:.1f}，延迟 {results[0]['latency']:.2f}ms")
+                else:
+                    logging.warning("[⚠️] 没有节点通过Google检查，将使用原始节点列表")
+            else:
+                logging.info("[ℹ️] 没有可测试的vmess节点，将使用原始节点列表")
         
-        if has_async:
-            nodes_path = get_nodes_path()
-            async with aiofiles.open(nodes_path, 'w', encoding='utf-8') as f:
-                await f.write('\n'.join(unique_lines))
-        else:
-            nodes_path = get_nodes_path()
-            with open(nodes_path, 'w', encoding='utf-8') as f:
-                f.write('\n'.join(unique_lines))
+        # 保存节点到文件
+        nodes_path = get_nodes_path()
+        async with aiofiles.open(nodes_path, 'w', encoding='utf-8') as f:
+            await f.write('\n'.join(unique_lines))
         
+        logging.info(f"[✅] 节点文件已保存到 {nodes_path}，共 {len(unique_lines)} 个节点")
+        
+        # 清理内存
         del content, lines, seen_node_identifiers
         import gc
         gc.collect()
