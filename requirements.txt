@@ -1,0 +1,6 @@
+requests
+pyyaml
+schedule
+python-dotenv
+beautifulsoup4
+lxml
