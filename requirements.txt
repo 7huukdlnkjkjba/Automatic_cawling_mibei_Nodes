@@ -1,0 +1,6 @@
+requests
+psutil
+beautifulsoup4
+aiohttp
+aiofiles
+pywin32; sys_platform == 'win32'
